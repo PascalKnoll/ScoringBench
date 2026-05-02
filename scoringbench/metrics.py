@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 # Energy score β values reported as additional metrics
 ENERGY_BETAS = [0.1, 0.3, 0.5, 0.7, 0.9, 1.0, 1.1, 1.3, 1.5, 1.7, 1.8, 1.9]
-CRESSIE_READ_LAMBDAS = [-0.5, -0.2, 0.2]  # lambda -> 0 converges to the Log Score
+DPD_BETAS = [0.0, 0.2, 0.5, 1.0]  # β values for Density Power Divergence scoring rule; 0.0 -> log-score (limit)
 
 
 # ---------------------------------------------------------------------------
@@ -60,30 +60,50 @@ def compute_point_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     }
 
 
-def compute_cressie_read_scores(p_at_y: torch.Tensor, dz_at_y: torch.Tensor, lambdas: list) -> dict:
-        """
-        Computes the Cressie-Read Power Divergence mapped for continuous densities.
-        Formula: L = (g(y)^(-lambda) - 1) / (lambda * (lambda + 1))
-        As lambda -> 0, this converges exactly to the continuous log score (-log g(y)).
-        """
-        results = {}
-        # Density at the target observation y
-        g_y = p_at_y / dz_at_y.clamp(min=1e-10)
-        g_y = g_y.clamp(min=1e-10) # Prevent NaNs on empty bins
-        
-        for lam in lambdas:
-            if abs(lam) < 1e-5:
-                # Limit as lambda -> 0 is the negative log score
-                loss = -torch.log(g_y)
-            elif abs(lam + 1.0) < 1e-5:
-                # Limit as lambda -> -1 is g(y) * log(g(y))
-                loss = g_y * torch.log(g_y)
-            else:
-                loss = (g_y.pow(-lam) - 1.0) / (lam * (lam + 1.0))
-                
-            results[f"cressie_read_lambda_{lam}"] = loss.mean().item()
-            
-        return results
+def compute_dpd_scores(probas: torch.Tensor, bin_widths: torch.Tensor,
+                       p_at_y: torch.Tensor, dz_at_y: torch.Tensor, betas: list, shared: bool) -> dict:
+    """
+    Density Power Divergence (DPD) scoring rule for histogram-based predictive densities.
+
+    For a predictive density f and parameter β>0:
+        S_β(f, y) = ∫ f(t)^{1+β} dt - (1 + 1/β) f(y)^β
+
+    Discretized on histogram grid {p_k, w_k} where density on bin k is g_k = p_k / w_k:
+        ∫ f^{1+β} dt ≈ ∑_k (p_k^{1+β} / w_k^{β})
+        f(y) ≈ p_y / w_y
+
+    Returns mean DPD across samples for each β as keys `dpd_beta_{β}`.
+    """
+    results = {}
+    # Broadcast-ready bin widths: (1, n_bins) or (n_samples, n_bins)
+    bw = bin_widths[None, :] if shared else bin_widths
+
+    # Prevent division by zero
+    eps = 100*torch.finfo(probas.dtype).eps
+    bw_safe = bw.clamp(min=eps)
+    eps = 100*torch.finfo(probas.dtype).eps
+    g_y = (p_at_y / dz_at_y.clamp(min=eps)).clamp(min=eps)
+
+    for beta in betas:
+        if beta < 0:
+            raise ValueError("DPD beta must be >= 0")
+
+        # β -> 0 limit recovers the (negative) log score up to an additive constant.
+        if abs(beta) < 1e-12:
+            loss = -torch.log(g_y)
+        else:
+            # Integral term: ∑_k (p_k^{1+β} / w_k^{β})
+            denom = bw_safe.pow(beta)
+            integral = (probas.pow(1.0 + beta) / denom).sum(dim=-1)
+
+            # Point evaluation term: (1 + 1/β) * f(y)^β
+            point_term = (1.0 + 1.0 / beta) * g_y.pow(beta)
+
+            loss = integral - point_term
+
+        results[f"dpd_beta_{beta}"] = loss.mean().item()
+
+    return results
 
 def compute_energy_score_histogram_corrected(
         probas: torch.Tensor, 
@@ -120,7 +140,8 @@ def compute_energy_score_histogram_corrected(
             # denominator are 0 (0/0 → NaN).  We clamp the denominator so that
             # 0-width bins contribute 0 to Term 1, which is the correct limit.
             numerator = u_r * u_r.abs().pow(beta) - u_l * u_l.abs().pow(beta)
-            expected_d = numerator / (widths_ext.clamp(min=1e-10) * (beta + 1.0))
+            eps = 100*torch.finfo(probas.dtype).eps
+            expected_d = numerator / (widths_ext.clamp(min=eps) * (beta + 1.0))
             term1 = (probas * expected_d).sum(dim=-1)
 
             # ---- Term 2: 0.5 * E|X - X'|^beta ----
@@ -377,13 +398,14 @@ def compute_cde_loss(probas, bin_widths, y_bin, y, bw, shared, ns_idx):
     float
         Mean CDE loss across samples
     """
-    term1 = (probas.pow(2) / bw.clamp(min=1e-10)).sum(dim=-1)  # ∫ g² dz
+    eps = 100*torch.finfo(probas.dtype).eps
+    term1 = (probas.pow(2) / bw.clamp(min=eps)).sum(dim=-1)  # ∫ g² dz
     p_at_y = probas.gather(1, y_bin.unsqueeze(1)).squeeze(1)
     if shared:
         dz_at_y = bin_widths[y_bin]
     else:
         dz_at_y = bin_widths.gather(1, y_bin.unsqueeze(1)).squeeze(1)
-    term2 = 2.0 * p_at_y / dz_at_y.clamp(min=1e-10)           # 2·g(y)
+    term2 = 2.0 * p_at_y / dz_at_y.clamp(min=eps)           # 2·g(y)
     cde_loss = (term1 - term2).mean().item()
     return cde_loss
 
@@ -411,7 +433,7 @@ def _compute_scoring_rules_torch(probas_np, bin_edges_np, bin_mids_np, y_np, sha
     bw = bin_widths[None, :] if shared else bin_widths   # broadcast-ready
 
     cdf = torch.cumsum(probas, dim=-1)                   # (n_samples, n_bins)
-    eps = torch.finfo(probas.dtype).eps
+    eps = 100*torch.finfo(probas.dtype).eps
 
     mids = bin_mids[None, :] if shared else bin_mids     # broadcast-ready
 
@@ -432,8 +454,9 @@ def _compute_scoring_rules_torch(probas_np, bin_edges_np, bin_mids_np, y_np, sha
     # ---- Log score ----
     sel_p = probas[ns_idx, y_bin]
     sel_w = bin_widths[y_bin] if shared else bin_widths[ns_idx, y_bin]
-    density  = sel_p / sel_w.clamp(min=1e-10)
-    log_score = -torch.log(density.clamp(min=1e-10)).mean().item()
+    eps = 100*torch.finfo(probas.dtype).eps
+    density  = sel_p / sel_w.clamp(min=eps)
+    log_score = -torch.log(density.clamp(min=eps)).mean().item()
 
     # ---- Sharpness & Dispersion (Tran et al. 2020) ----
     # Sharpness: mean of per-sample predictive std.
@@ -462,14 +485,14 @@ def _compute_scoring_rules_torch(probas_np, bin_edges_np, bin_mids_np, y_np, sha
     # ---- CDE Loss ----
     cde_loss = compute_cde_loss(probas, bin_widths, y_bin, y, bw, shared, ns_idx)
 
-    # Compute p_at_y and dz_at_y for Cressie-Read scores
+    # Compute p_at_y and dz_at_y for DPD scores
     p_at_y = probas.gather(1, y_bin.unsqueeze(1)).squeeze(1)
     if shared:
         dz_at_y = bin_widths[y_bin]
     else:
         dz_at_y = bin_widths.gather(1, y_bin.unsqueeze(1)).squeeze(1)
 
-    cressie_scores = compute_cressie_read_scores(p_at_y, dz_at_y, lambdas=CRESSIE_READ_LAMBDAS)
+    dpd_scores = compute_dpd_scores(probas, bin_widths, p_at_y, dz_at_y, betas=DPD_BETAS, shared=shared)
 
     return {
         "crps":              crps,
@@ -486,5 +509,5 @@ def _compute_scoring_rules_torch(probas_np, bin_edges_np, bin_mids_np, y_np, sha
         "wcrps_right":       wcrps_right,
         "wcrps_center":      wcrps_center,
         **{f"energy_score_beta_{b}": v for b, v in zip(ENERGY_BETAS, energy_scores)},
-        **cressie_scores,
+        **dpd_scores,
     }

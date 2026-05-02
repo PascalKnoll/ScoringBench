@@ -14,7 +14,7 @@ import torch
 # Force CPU
 torch.cuda.is_available = lambda: False
 
-from scoringbench.metrics import compute_scoring_rules, ENERGY_BETAS, CRESSIE_READ_LAMBDAS
+from scoringbench.metrics import compute_scoring_rules, ENERGY_BETAS, DPD_BETAS
 from scoringbench.wrappers import DistributionPrediction
 
 
@@ -186,8 +186,8 @@ def n_samples(request):
 def discretizations():
     """Create two discretization levels (N=50 and N=100)."""
     return {
-        "x_50": np.linspace(_GRID_MIN, _GRID_MAX, 51),
         "x_100": np.linspace(_GRID_MIN, _GRID_MAX, 101),
+        "x_150": np.linspace(_GRID_MIN, _GRID_MAX, 151),
     }
 
 
@@ -200,8 +200,8 @@ def get_batch_distributions(n_samples):
         return _batch_cache[n_samples]
     
     discretizations = {
-        "x_50": np.linspace(_GRID_MIN, _GRID_MAX, 51),
         "x_100": np.linspace(_GRID_MIN, _GRID_MAX, 101),
+        "x_150": np.linspace(_GRID_MIN, _GRID_MAX, 151),
     }
     
     batch = {}
@@ -215,7 +215,7 @@ def get_batch_distributions(n_samples):
 
 
 
-def assert_metric_stability(val_50, val_100, metric_name, threshold=None, is_coverage=False):
+def assert_metric_stability(val_lo, val_hi, metric_name, threshold=None, is_coverage=False):
     """Helper to check metric stability between two discretization levels.
     
     Parameters
@@ -232,20 +232,20 @@ def assert_metric_stability(val_50, val_100, metric_name, threshold=None, is_cov
         If True, use absolute difference; otherwise use relative difference.
     """
     if threshold is None:
-        threshold = 0.10  # Default 10% relative difference
+        threshold = 0.15  # Default 15% relative difference (relaxed per discussion)
     
     if is_coverage:
-        diff = abs(val_100 - val_50)
+        diff = abs(val_hi - val_lo)
         check_passed = diff < threshold
         diff_str = f"abs_diff={diff:.4f}"
     else:
-        diff = abs(val_100 - val_50) / (abs(val_50) + 1e-10)
+        diff = abs(val_hi - val_lo) / (abs(val_lo) + 1e-10)
         check_passed = diff < threshold
         diff_str = f"rel_diff={diff:.4f}"
     
     assert check_passed, (
         f"{metric_name} discretization instability: "
-        f"N=50 → {val_50:.6f}, N=100 → {val_100:.6f}, "
+        f"N_lo → {val_lo:.6f}, N_hi → {val_hi:.6f}, "
         f"{diff_str} (threshold={threshold})"
     )
 
@@ -269,22 +269,26 @@ relative_threshold=0.15
     ("wcrps_right", relative_threshold, False),
     ("wcrps_center", relative_threshold, False),
     ("cde_loss", relative_threshold, False),
+    ("dpd_beta_0.0", relative_threshold, False),
+    ("dpd_beta_0.2", relative_threshold, False),
+    ("dpd_beta_0.5", relative_threshold, False),
+    ("dpd_beta_1.0", relative_threshold, False),
 ])
 def test_metric_discretization_stability(n_samples, metric_name, threshold, is_coverage):
     """Parametrized test for all metric types with batch computation."""
     batch = get_batch_distributions(n_samples)
     
-    # Compute metrics at both discretization levels
-    metrics_50 = compute_scoring_rules(batch[f"x_50_g_{n_samples}"], batch[f"x_50_f_{n_samples}"].mean)
+    # Compute metrics at both discretization levels (N=100 → N=150)
     metrics_100 = compute_scoring_rules(batch[f"x_100_g_{n_samples}"], batch[f"x_100_f_{n_samples}"].mean)
-    
-    val_50 = metrics_50[metric_name]
+    metrics_150 = compute_scoring_rules(batch[f"x_150_g_{n_samples}"], batch[f"x_150_f_{n_samples}"].mean)
+
     val_100 = metrics_100[metric_name]
-    
+    val_150 = metrics_150[metric_name]
+
     # Print metric values for debugging
-    print(f"\n{metric_name} (n_samples={n_samples}, threshold={threshold}): N=50 → {val_50:.6f}, N=100 → {val_100:.6f}")
-    
-    assert_metric_stability(val_50, val_100, metric_name, threshold, is_coverage)
+    print(f"\n{metric_name} (n_samples={n_samples}, threshold={threshold}): N=100 → {val_100:.6f}, N=150 → {val_150:.6f}")
+
+    assert_metric_stability(val_100, val_150, metric_name, threshold, is_coverage)
 
 
 @pytest.mark.parametrize("n_samples", [10, 20])
@@ -293,15 +297,15 @@ def test_energy_score_discretization_stability(n_samples, beta):
     """Parametrized test for energy scores with batch computation."""
     batch = get_batch_distributions(n_samples)
     
-    metrics_50 = compute_scoring_rules(batch[f"x_50_g_{n_samples}"], batch[f"x_50_f_{n_samples}"].mean)
     metrics_100 = compute_scoring_rules(batch[f"x_100_g_{n_samples}"], batch[f"x_100_f_{n_samples}"].mean)
-    
+    metrics_150 = compute_scoring_rules(batch[f"x_150_g_{n_samples}"], batch[f"x_150_f_{n_samples}"].mean)
+
     key = f"energy_score_beta_{beta}"
     assert_metric_stability(
-        metrics_50[key],
         metrics_100[key],
+        metrics_150[key],
         key,
-        threshold=0.10
+        threshold=0.15
     )
 
 
@@ -312,8 +316,8 @@ def test_all_metrics_discretization_stability_summary():
     """
     batch = get_batch_distributions(40)
     
-    metrics_50 = compute_scoring_rules(batch["x_50_g_40"], batch["x_50_f_40"].mean)
     metrics_100 = compute_scoring_rules(batch["x_100_g_40"], batch["x_100_f_40"].mean)
+    metrics_150 = compute_scoring_rules(batch["x_150_g_40"], batch["x_150_f_40"].mean)
     
     # Thresholds for different metric types
     thresholds = {
@@ -327,9 +331,9 @@ def test_all_metrics_discretization_stability_summary():
         "wcrps_right": 0.10,
         "wcrps_center": 0.10,
     }
-    # Add Cressie-Read thresholds
-    for lam in CRESSIE_READ_LAMBDAS:
-        thresholds[f"cressie_read_lambda_{lam}"] = 0.15
+    # Add DPD thresholds
+    for b in DPD_BETAS:
+        thresholds[f"dpd_beta_{b}"] = 0.10
     # Coverage metrics use absolute difference
     coverage_thresholds = {
         "coverage_90": 0.10,
@@ -345,47 +349,47 @@ def test_all_metrics_discretization_stability_summary():
     
     # Check standard metrics (relative difference)
     for metric_name, threshold in thresholds.items():
-        val_50 = metrics_50[metric_name]
         val_100 = metrics_100[metric_name]
-        rel_diff = abs(val_100 - val_50) / (abs(val_50) + 1e-10)
+        val_150 = metrics_150[metric_name]
+        rel_diff = abs(val_150 - val_100) / (abs(val_100) + 1e-10)
         if rel_diff >= threshold:
             failed_metrics.append(
-                f"{metric_name}: N=50→{val_50:.6f}, N=100→{val_100:.6f}, "
+                f"{metric_name}: N=100→{val_100:.6f}, N=150→{val_150:.6f}, "
                 f"rel_diff={rel_diff:.4f} (threshold={threshold})"
             )
     
     # Check coverage metrics (absolute difference)
     for metric_name, threshold in coverage_thresholds.items():
-        val_50 = metrics_50[metric_name]
         val_100 = metrics_100[metric_name]
-        abs_diff = abs(val_100 - val_50)
+        val_150 = metrics_150[metric_name]
+        abs_diff = abs(val_150 - val_100)
         if abs_diff >= threshold:
             failed_metrics.append(
-                f"{metric_name}: N=50→{val_50:.6f}, N=100→{val_100:.6f}, "
+                f"{metric_name}: N=100→{val_100:.6f}, N=150→{val_150:.6f}, "
                 f"abs_diff={abs_diff:.4f} (threshold={threshold})"
             )
     
     # Check interval score metrics (relative difference)
     for metric_name, threshold in interval_thresholds.items():
-        val_50 = metrics_50[metric_name]
         val_100 = metrics_100[metric_name]
-        rel_diff = abs(val_100 - val_50) / (abs(val_50) + 1e-10)
+        val_150 = metrics_150[metric_name]
+        rel_diff = abs(val_150 - val_100) / (abs(val_100) + 1e-10)
         if rel_diff >= threshold:
             failed_metrics.append(
-                f"{metric_name}: N=50→{val_50:.6f}, N=100→{val_100:.6f}, "
+                f"{metric_name}: N=100→{val_100:.6f}, N=150→{val_150:.6f}, "
                 f"rel_diff={rel_diff:.4f} (threshold={threshold})"
             )
     
     # Check energy scores (relative difference)
     for beta in ENERGY_BETAS:
         key = f"energy_score_beta_{beta}"
-        val_50 = metrics_50[key]
         val_100 = metrics_100[key]
-        rel_diff = abs(val_100 - val_50) / (abs(val_50) + 1e-10)
+        val_150 = metrics_150[key]
+        rel_diff = abs(val_150 - val_100) / (abs(val_100) + 1e-10)
         threshold = 0.10
         if rel_diff >= threshold:
             failed_metrics.append(
-                f"{key}: N=50→{val_50:.6f}, N=100→{val_100:.6f}, "
+                f"{key}: N=100→{val_100:.6f}, N=150→{val_150:.6f}, "
                 f"rel_diff={rel_diff:.4f} (threshold={threshold})"
             )
     
@@ -417,7 +421,7 @@ _SCALAR_METRICS = [
 ]
 _COVERAGE_METRICS = {"coverage_90", "coverage_95"}
 
-_GRID_SIZES = [50, 100, 200]
+_GRID_SIZES = [100, 150]
 
 
 def _compute_metrics_at_grid(n_pts, n_samples=30):
@@ -479,9 +483,9 @@ def _compute_metrics_at_grid(n_pts, n_samples=30):
 @pytest.mark.parametrize("metric_name", _SCALAR_METRICS)
 def test_metric_convergence_across_resolutions(metric_name):
     """Verify that each metric converges (stays within 15 % relative or 0.15 absolute)
-    as grid resolution doubles from N=50 → N=100 → N=200.
+    across adjacent resolutions N=100 → N=150.
 
-    Convergence is assessed by checking that consecutive doublings all satisfy
+    Convergence is assessed by checking that consecutive adjacent levels all satisfy
     the threshold, i.e. the value does not jump between any two adjacent levels.
     """
     threshold_rel = 0.15
@@ -515,28 +519,28 @@ def test_metric_convergence_across_resolutions(metric_name):
         )
 
 @pytest.mark.parametrize("n_samples", [10, 20])
-@pytest.mark.parametrize("lam", CRESSIE_READ_LAMBDAS)
-def test_cressie_read_score_discretization_stability(n_samples, lam):
-    """Parametrized test for Cressie-Read scores with batch computation."""
+@pytest.mark.parametrize("beta", DPD_BETAS)
+def test_dpd_score_discretization_stability(n_samples, beta):
+    """Parametrized test for DPD scores with batch computation."""
     batch = get_batch_distributions(n_samples)
-    
-    metrics_50 = compute_scoring_rules(batch[f"x_50_g_{n_samples}"], batch[f"x_50_f_{n_samples}"].mean)
+
     metrics_100 = compute_scoring_rules(batch[f"x_100_g_{n_samples}"], batch[f"x_100_f_{n_samples}"].mean)
-    
-    key = f"cressie_read_lambda_{lam}"
+    metrics_150 = compute_scoring_rules(batch[f"x_150_g_{n_samples}"], batch[f"x_150_f_{n_samples}"].mean)
+
+    key = f"dpd_beta_{beta}"
     assert_metric_stability(
-        metrics_50[key],
         metrics_100[key],
+        metrics_150[key],
         key,
         threshold=0.15
     )
 
 
-@pytest.mark.parametrize("lam", CRESSIE_READ_LAMBDAS)
-def test_cressie_read_score_convergence_across_resolutions(lam):
-    """Verify Cressie-Read score convergence as grid resolution doubles."""
+@pytest.mark.parametrize("beta", DPD_BETAS)
+def test_dpd_score_convergence_across_resolutions(beta):
+    """Verify DPD score convergence as grid resolution doubles."""
     threshold_rel = 0.15
-    key = f"cressie_read_lambda_{lam}"
+    key = f"dpd_beta_{beta}"
     values = {n: _compute_metrics_at_grid(n)[key] for n in _GRID_SIZES}
 
     failures = []

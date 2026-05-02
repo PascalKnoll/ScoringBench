@@ -75,7 +75,17 @@ class TabICLWrapper(ProbabilisticWrapper):
         # Extend with boundary CDF values (0 at left tail, 1 at right tail)
         alphas_ext = np.concatenate([[0.0], alphas, [1.0]])
 
-        n_grid = self._N_GRID
+        # Determine per-sample regular grid size: prefer explicit _N_GRID
+        # (set when __init__ is run), otherwise derive from _ALPHAS for
+        # test instances created via __new__ that only set `_ALPHAS`.
+        n_grid = getattr(self, "_N_GRID", None)
+        if n_grid is None:
+            n_grid = len(alphas)
+            # Cache derived grid size so tests and callers can inspect it
+            try:
+                self._N_GRID = int(n_grid)
+            except Exception:
+                pass
         all_bin_edges = np.empty((n_samples, n_grid + 1), dtype=np.float32)
         all_probas    = np.empty((n_samples, n_grid),     dtype=np.float32)
 
