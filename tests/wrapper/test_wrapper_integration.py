@@ -132,6 +132,33 @@ def _make_catboost_quantile():
     return CatBoostQuantileWrapper(n_quantiles=99, iterations=200)
 
 
+def _make_crepes():
+    from scoringbench.wrappers.crepes_wrapper import CrepesWrapper
+    from sklearn.ensemble import RandomForestRegressor
+
+    return CrepesWrapper(
+        base_model=RandomForestRegressor(n_estimators=50, random_state=42),
+        n_quantiles=99,
+        calibration_split=0.2,
+        random_state=42,
+        use_mondrian_categorizer=False,
+    )
+
+
+def _make_crepes_mondrian():
+    from scoringbench.wrappers.crepes_wrapper import CrepesWrapper
+    from sklearn.ensemble import RandomForestRegressor
+
+    return CrepesWrapper(
+        base_model=RandomForestRegressor(n_estimators=50, random_state=42),
+        n_quantiles=99,
+        calibration_split=0.2,
+        random_state=42,
+        use_mondrian_categorizer=True,
+        mondrian_no_bins=10,
+    )
+
+
 def _make_xgblss():
     from scoringbench.wrappers.xgblss_wrapper import XGBLSSWrapper
     return XGBLSSWrapper(n_quantiles=50, num_boost_round=100, distribution="Gaussian")
@@ -147,6 +174,8 @@ MODEL_FACTORIES = [
     pytest.param(("TabICLWrapper",            _make_tabicl),       id="TabICLWrapper"),
     pytest.param(("PytabkitRealMLPWrapper",   _make_pytabkit),     id="PytabkitRealMLPWrapper"),
     pytest.param(("CatBoostQuantileWrapper",  _make_catboost_quantile), id="CatBoostQuantileWrapper"),
+    pytest.param(("CrepesWrapper",            _make_crepes),         id="CrepesWrapper"),
+    pytest.param(("CrepesWrapper+Mondrian",   _make_crepes_mondrian), id="CrepesWrapper+Mondrian"),
     pytest.param(("XGBLSSWrapper",            _make_xgblss),       id="XGBLSSWrapper"),
 ]
 

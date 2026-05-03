@@ -42,7 +42,10 @@ from scoringbench.wrappers import (
     PytabkitTabMDWrapper,
     PytabkitTabMHPOWrapper,
     CatBoostQuantileWrapper,
+    CrepesWrapper,
 )
+from xgboost import XGBRegressor
+from catboost import CatBoostRegressor
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +195,42 @@ MODELS = {
         n_cv=8,
         hpo_space_name='tabarena-new',
         use_caruana_ensembling=True,
+    ),
+    
+    "crepes_xgb_difficulty": lambda: CrepesWrapper(
+        base_model=XGBRegressor(n_estimators=100, random_state=0),
+        n_quantiles=99,
+        calibration_split=0.2,
+        random_state=0,
+        use_difficulty_estimator=True,
+        use_mondrian_categorizer=False,
+    ),
+    
+    "crepes_catboost_difficulty": lambda: CrepesWrapper(
+        base_model=CatBoostRegressor(iterations=100, verbose=False, random_state=0),
+        n_quantiles=99,
+        calibration_split=0.2,
+        random_state=0,
+        use_difficulty_estimator=True,
+        use_mondrian_categorizer=False,
+    ),
+    "crepes_xgb_difficulty_mondrian": lambda: CrepesWrapper(
+        base_model=XGBRegressor(n_estimators=100, random_state=0),
+        n_quantiles=99,
+        calibration_split=0.2,
+        random_state=0,
+        use_difficulty_estimator=True,
+        use_mondrian_categorizer=True,
+    ),
+    
+    # CatBoost with DifficultyEstimator
+    "crepes_catboost_difficulty_mondrian": lambda: CrepesWrapper(
+        base_model=CatBoostRegressor(iterations=100, verbose=False, random_state=0),
+        n_quantiles=99,
+        calibration_split=0.2,
+        random_state=0,
+        use_difficulty_estimator=True,
+        use_mondrian_categorizer=True,
     ),
 }
 

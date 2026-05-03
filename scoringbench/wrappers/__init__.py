@@ -21,6 +21,7 @@ from .pytabkit import (
     PytabkitTabMHPOWrapper,
 )
 from .catboost_wrapper import CatBoostQuantileWrapper
+from .crepes_wrapper import CrepesWrapper
 
 __all__ = [
     "DistributionPrediction",
@@ -37,4 +38,5 @@ __all__ = [
     "PytabkitTabMDWrapper",
     "PytabkitTabMHPOWrapper",
     "CatBoostQuantileWrapper",
+    "CrepesWrapper",
 ]
