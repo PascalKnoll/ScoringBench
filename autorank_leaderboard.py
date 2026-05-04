@@ -125,7 +125,37 @@ def load_metric_matrix(root, metric):
         return None, None
     
     # Step 4: Keep only models with sufficient coverage, then remove datasets with any NaN
-    pivot_filtered = pivot[models_sufficient_coverage].dropna(how='any')
+    pivot_subset = pivot[models_sufficient_coverage]
+    
+    # DEBUG: Find datasets with high model coverage that still get dropped
+    datasets_before = set(pivot_subset.index)
+    pivot_filtered = pivot_subset.dropna(how='any')
+    datasets_after = set(pivot_filtered.index)
+    datasets_dropped = sorted(datasets_before - datasets_after)
+    
+    if datasets_dropped:
+        print(f"\n📊 DEBUG: Datasets dropped due to incomplete model coverage ({len(datasets_dropped)} total):")
+        # Count model coverage for each dropped dataset
+        dropped_coverage = []
+        for ds in datasets_dropped:
+            coverage_count = pivot_subset.loc[ds].notna().sum()
+            dropped_coverage.append((ds, coverage_count, len(models_sufficient_coverage)))
+        
+        # Sort by coverage count (descending) to show which could most help
+        dropped_coverage.sort(key=lambda x: x[1], reverse=True)
+        
+        # Show top 10 and identify missing models for those with < 20% missing
+        for ds, covered, total in dropped_coverage[:10]:
+            missing_pct = (total - covered) / total * 100
+            print(f"   • {ds:45s}: {covered}/{total} models ({covered/total*100:.0f}%)")
+            
+            # If less than 20% missing, show which models are missing
+            if missing_pct < 20:
+                missing_models = [m for m in models_sufficient_coverage if pd.isna(pivot_subset.loc[ds, m])]
+                print(f"      └─ Missing: {', '.join(missing_models)}")
+        
+        if len(datasets_dropped) > 10:
+            print(f"   ... and {len(datasets_dropped) - 10} more")
     
     if pivot_filtered.empty:
         return None, None

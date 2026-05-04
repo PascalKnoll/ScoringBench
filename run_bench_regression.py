@@ -167,6 +167,24 @@ MODELS = {
         verbose=True,
     ),
     "tabiclv2": lambda: TabICLWrapper(),
+    "crepes_tabiclv2": lambda: CrepesWrapper(
+        # Use raw TabICL regressor from the tabicl package as base_model
+        base_model=__import__("tabicl").TabICLRegressor(),
+        n_quantiles=99,
+        calibration_split=0.2,
+        random_state=0,
+        use_difficulty_estimator=True,
+        use_mondrian_categorizer=False,
+    ),
+    "crepes_tabiclv2_mondrian": lambda: CrepesWrapper(
+        base_model=__import__("tabicl").TabICLRegressor(),
+        n_quantiles=99,
+        calibration_split=0.2,
+        random_state=0,
+        use_difficulty_estimator=True,
+        use_mondrian_categorizer=True,
+        mondrian_no_bins=10,
+    ),
     "xgb_vector": lambda: XGBVectorWrapper(n_bins=50, num_boost_round=100),
     "xgb_vector_quantile": lambda: XGBQuantileVectorWrapper(n_bins=50, num_boost_round=100),
     "catboost_quantile": lambda: CatBoostQuantileWrapper(n_quantiles=99, iterations=1000),
@@ -205,7 +223,6 @@ MODELS = {
         use_difficulty_estimator=True,
         use_mondrian_categorizer=False,
     ),
-    
     "crepes_catboost_difficulty": lambda: CrepesWrapper(
         base_model=CatBoostRegressor(iterations=100, verbose=False, random_state=0),
         n_quantiles=99,
@@ -223,7 +240,6 @@ MODELS = {
         use_mondrian_categorizer=True,
     ),
     
-    # CatBoost with DifficultyEstimator
     "crepes_catboost_difficulty_mondrian": lambda: CrepesWrapper(
         base_model=CatBoostRegressor(iterations=100, verbose=False, random_state=0),
         n_quantiles=99,

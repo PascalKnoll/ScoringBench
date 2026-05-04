@@ -126,8 +126,14 @@ class CrepesWrapper(ProbabilisticWrapper):
                 ) from exc
             
             de = DifficultyEstimator()
-            # Fit on a subset of calibration data
-            split_idx = int(len(X_cal) * 0.5)
+            # Adaptive split: use more data for DE in low data regimes to avoid
+            # insufficient samples for KNN in crepes (n_neighbors default is 25)
+            if len(X_cal) < 60:
+                # Small calibration set: use 90% for DE fitting
+                split_idx = int(len(X_cal) * 0.9)
+            else:
+                # Normal regime: use 50% for DE fitting (original behavior)
+                split_idx = int(len(X_cal) * 0.5)
             de.fit(X_cal[:split_idx], y=y_cal[:split_idx])
             self._difficulty_estimator = de
 
