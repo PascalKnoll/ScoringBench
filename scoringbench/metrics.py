@@ -26,6 +26,7 @@ import time
 
 import numpy as np
 import torch
+from scipy import stats
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 from .wrappers import DistributionPrediction
@@ -351,6 +352,58 @@ def compute_crls(cdf, bin_widths, y_bin, n_bins, device, eps, bw, shared):
     return crls
 
 
+def compute_pit_ks(probas, cdf, bin_edges, bin_widths, y_bin, y, shared, ns_idx):
+    """Compute PIT values and the Kolmogorov-Smirnov p-value vs. Uniform(0, 1).
+
+    Probability Integral Transform (Dawid 1984; Diebold et al. 1998):
+        p_t = F_t(x_t)
+    If the predictive distributions F_t are ideal and continuous, the PIT
+    values {p_t} are i.i.d. Uniform(0, 1).  We test that null hypothesis with
+    a one-sample Kolmogorov-Smirnov test.
+
+    For a histogram predictive density we treat each bin as having a uniform
+    density (piecewise-linear CDF), so for y in bin k_y:
+        F(y) = cdf_{k_y - 1} + p_{k_y} * (y - left_edge_{k_y}) / w_{k_y}
+    Values outside the support are clamped to [0, 1].
+
+    Returns
+    -------
+    dict with keys:
+        pit_ks_stat : float    KS statistic (sup |F_emp(p) - p|)
+        pit_ks_pvalue : float  Two-sided p-value vs. Uniform(0, 1)
+    """
+    eps = 100 * torch.finfo(probas.dtype).eps
+
+    # Probability mass and width of the bin containing each y
+    p_y = probas.gather(1, y_bin.unsqueeze(1)).squeeze(1)
+    if shared:
+        w_y = bin_widths[y_bin]
+        left_y = bin_edges[y_bin]
+        support_lo = bin_edges[0]
+        support_hi = bin_edges[-1]
+    else:
+        w_y = bin_widths.gather(1, y_bin.unsqueeze(1)).squeeze(1)
+        left_y = bin_edges.gather(1, y_bin.unsqueeze(1)).squeeze(1)
+        support_lo = bin_edges[:, 0]
+        support_hi = bin_edges[:, -1]
+
+    # Cumulative mass strictly below the y-bin
+    cdf_prev = cdf[ns_idx, y_bin] - p_y
+    frac = ((y - left_y) / w_y.clamp(min=eps)).clamp(0.0, 1.0)
+    pit = (cdf_prev + p_y * frac).clamp(0.0, 1.0)
+
+    # y outside support -> clamp PIT to 0 / 1
+    pit = torch.where(y <= support_lo, torch.zeros_like(pit), pit)
+    pit = torch.where(y >= support_hi, torch.ones_like(pit), pit)
+
+    pit_np = pit.detach().cpu().numpy().astype(np.float64)
+    ks = stats.kstest(pit_np, "uniform")
+    return {
+        "pit_ks_stat":   float(ks.statistic),
+        "pit_ks_pvalue": float(ks.pvalue),
+    }
+
+
 def compute_cde_loss(probas, bin_widths, y_bin, y, bw, shared, ns_idx):
     """Compute Continuous Density Estimation (CDE) Loss.
     
@@ -469,8 +522,16 @@ def _compute_scoring_rules_torch(probas_np, bin_edges_np, bin_mids_np, y_np, sha
     dispersion = std_per_sample.std(unbiased=False).item()
 
     # ---- Interval scores (shared path: vectorised; non-shared: searchsorted) ----
-    is_90, cov_90 = _interval(0.10, cdf, bin_edges, y, n_samples, n_bins, device, shared, y_bin, ns_idx)
-    is_95, cov_95 = _interval(0.05, cdf, bin_edges, y, n_samples, n_bins, device, shared, y_bin, ns_idx)
+    # Coverage levels: 20, 40, 60, 80, 90, 95 (%)
+    # Corresponding alpha (significance) levels: 0.80, 0.60, 0.40, 0.20, 0.10, 0.05
+    coverage_levels = [20, 40, 60, 80, 90, 95]
+    alpha_levels = [0.80, 0.60, 0.40, 0.20, 0.10, 0.05]
+    interval_results = {}
+    
+    for cov_level, alpha in zip(coverage_levels, alpha_levels):
+        is_alpha, cov_alpha = _interval(alpha, cdf, bin_edges, y, n_samples, n_bins, device, shared, y_bin, ns_idx)
+        interval_results[f"coverage_{cov_level}"] = cov_alpha
+        interval_results[f"interval_score_{cov_level}"] = is_alpha
 
  
     energy_scores = []
@@ -484,6 +545,9 @@ def _compute_scoring_rules_torch(probas_np, bin_edges_np, bin_mids_np, y_np, sha
 
     # ---- CDE Loss ----
     cde_loss = compute_cde_loss(probas, bin_widths, y_bin, y, bw, shared, ns_idx)
+
+    # ---- PIT KS test (Dawid 1984; Diebold et al. 1998) ----
+    pit_ks = compute_pit_ks(probas, cdf, bin_edges, bin_widths, y_bin, y, shared, ns_idx)
 
     # Compute p_at_y and dz_at_y for DPD scores
     p_at_y = probas.gather(1, y_bin.unsqueeze(1)).squeeze(1)
@@ -499,12 +563,11 @@ def _compute_scoring_rules_torch(probas_np, bin_edges_np, bin_mids_np, y_np, sha
         "log_score":         log_score,
         "sharpness":         sharpness,
         "dispersion":        dispersion,
-        "coverage_90":       cov_90,
-        "interval_score_90": is_90,
-        "coverage_95":       cov_95,
-        "interval_score_95": is_95,
+        **interval_results,
         "crls":              crls,
         "cde_loss":          cde_loss,
+        "pit_ks_stat":       pit_ks["pit_ks_stat"],
+        "pit_ks_pvalue":     pit_ks["pit_ks_pvalue"],
         "wcrps_left":        wcrps_left,
         "wcrps_right":       wcrps_right,
         "wcrps_center":      wcrps_center,

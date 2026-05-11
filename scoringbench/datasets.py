@@ -13,7 +13,6 @@ from sklearn.datasets import (
     load_iris, load_diabetes, load_breast_cancer, load_wine, load_digits,
     fetch_openml,
 )
-from sklearn.impute import SimpleImputer
 import openml
 
 # ---------------------------------------------------------------------------
@@ -138,16 +137,16 @@ def _is_duplicate(new_name: str, existing_names: set[str],
     return False
 
 
-def _is_binary_classification(y: pd.Series) -> bool:
-    """Check if target variable indicates binary classification (not regression).
+def _is_classification(y: pd.Series) -> bool:
+    """Check if target variable indicates binary or few-class classification (not regression).
     
-    Returns True if y has exactly 2 unique values (binary classification).
+    Returns True if y has fewer than 4 unique values (binary or few-class classification).
     These datasets should be skipped from a regression benchmark.
     """
     # Handle NaN values
     y_clean = y.dropna()
     n_unique = y_clean.nunique()
-    return n_unique == 2
+    return n_unique < 4
 
 
 # ---------------------------------------------------------------------------
@@ -622,38 +621,16 @@ def load_dataset(dataset_config: dict) -> tuple[pd.DataFrame, pd.Series]:
     X = X[target_valid_mask].reset_index(drop=True)
     y = y[target_valid_mask].reset_index(drop=True)
 
-    # Impute missing feature values
-    if X.isna().sum().sum() > 0:
-        numeric_cols = X.select_dtypes(include=[np.number]).columns
-        categorical_cols = X.select_dtypes(exclude=[np.number]).columns
-
-        if len(numeric_cols) > 0:
-            numeric_imputer = SimpleImputer(strategy='median')
-            X[numeric_cols] = numeric_imputer.fit_transform(X[numeric_cols])
-
-        if len(categorical_cols) > 0:
-            categorical_imputer = SimpleImputer(strategy='most_frequent')
-            X[categorical_cols] = categorical_imputer.fit_transform(
-                X[categorical_cols]
-            )
 
     # Convert categorical columns to numeric using label encoding
     for col in X.select_dtypes(exclude=[np.number]).columns:
         X[col] = pd.Categorical(X[col]).codes
 
-    # NOTE: Subsampling moved to CV loop for diversity
-    # # Apply per-dataset sample size limit
-    # sample_size = dataset_config.get('sample_size')
-    # if sample_size and len(X) > sample_size:
-    #     indices = np.random.choice(len(X), size=sample_size, replace=False)
-    #     X = X.iloc[indices].reset_index(drop=True)
-    #     y = y.iloc[indices].reset_index(drop=True)
-
     return X, y
 
 
 def validate_datasets(datasets_config):
-    """Filter out binary classification datasets (not regression).
+    """Filter out binary or few-class classification datasets (not regression).
     
     Called only when benchmark actually runs, not at import time.
     
@@ -668,10 +645,10 @@ def validate_datasets(datasets_config):
         Filtered datasets suitable for regression benchmarking
     """
     print("\n" + "="*70)
-    print("VALIDATING DATASETS (checking for binary classification)...")
+    print("VALIDATING DATASETS (checking for binary or few-class classification)...")
     print("="*70)
 
-    _binary_classification_removed = []
+    _classification_removed = []
     _validated_datasets = []
 
     for _ds in datasets_config:
@@ -679,9 +656,9 @@ def validate_datasets(datasets_config):
             print(f"  Checking {_ds['name']:40s}...", end=" ", flush=True)
             _, _y = load_dataset(_ds)
             _n_unique = _y.nunique()
-            if _is_binary_classification(_y):
-                print("❌ REMOVED (binary classification - 2 labels)")
-                _binary_classification_removed.append(_ds['name'])
+            if _is_classification(_y):
+                print("❌ REMOVED (binary or few-class classification - less than 4 labels)")
+                _classification_removed.append(_ds['name'])
             else:
                 print(f"✓ OK ({_n_unique} unique values)")
                 _validated_datasets.append(_ds)
@@ -690,10 +667,10 @@ def validate_datasets(datasets_config):
             _validated_datasets.append(_ds)
 
     print("\n" + "="*70)
-    if _binary_classification_removed:
-        print(f"⚠️  REMOVED {len(_binary_classification_removed)} BINARY CLASSIFICATION DATASETS:")
-        for _name in _binary_classification_removed:
-            print(f"    • {_name} (only 2 y labels - not suitable for regression)")
+    if _classification_removed:
+        print(f"⚠️  REMOVED {len(_classification_removed)} BINARY OR FEW-CLASS CLASSIFICATION DATASETS:")
+        for _name in _classification_removed:
+            print(f"    • {_name} (less than 4 y labels - not suitable for regression)")
     print("="*70)
 
     print(f"\n✓ FINAL CLEAN LIST: {len(_validated_datasets)} regression datasets")

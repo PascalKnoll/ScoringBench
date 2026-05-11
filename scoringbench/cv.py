@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 import torch
 from sklearn.model_selection import KFold
+from sklearn.impute import SimpleImputer
 
 from .metrics import compute_metrics, compute_point_metrics, ENERGY_BETAS
 from .wrappers import ProbabilisticWrapper
@@ -40,12 +41,34 @@ def run_fold(
     Each factory produces a fresh ProbabilisticWrapper.
     If predict_distribution() is not implemented, falls back to point metrics
     only (distributional metrics are set to None).
+    
+    Imputation is performed within this fold:
+    - fit_transform on X_train only (learn statistics from train data)
+    - transform on X_test (apply train statistics)
+    This ensures no data leakage from test to train via imputation statistics.
 
     Returns {model_name: {mae, rmse, r2, crps, log_score, sharpness,
                           coverage_90, interval_score_90,
                           coverage_95, interval_score_95,
                           train_time}}
     """
+    # Impute missing values (learn from train, apply to both train and test)
+    if X_train.isna().sum().sum() > 0 or X_test.isna().sum().sum() > 0:
+        numeric_cols = X_train.select_dtypes(include=[np.number]).columns
+        categorical_cols = X_train.select_dtypes(exclude=[np.number]).columns
+
+        if len(numeric_cols) > 0:
+            numeric_imputer = SimpleImputer(strategy='median')
+            numeric_imputer.fit(X_train[numeric_cols])
+            X_train[numeric_cols] = numeric_imputer.transform(X_train[numeric_cols])
+            X_test[numeric_cols] = numeric_imputer.transform(X_test[numeric_cols])
+
+        if len(categorical_cols) > 0:
+            categorical_imputer = SimpleImputer(strategy='most_frequent')
+            categorical_imputer.fit(X_train[categorical_cols])
+            X_train[categorical_cols] = categorical_imputer.transform(X_train[categorical_cols])
+            X_test[categorical_cols] = categorical_imputer.transform(X_test[categorical_cols])
+
     y_test_np = np.asarray(y_test, dtype=float)
     fold_results: dict[str, dict] = {}
 

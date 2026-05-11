@@ -491,7 +491,7 @@ def main():
 
         # Determine metric ordering and apply any score transformation
         is_coverage = metric.startswith("coverage_")
-        hib = metric in ("r2", "dispersion")
+        hib = metric in ("r2", "dispersion", "pit_ks_pvalue")
 
         if is_coverage:
             # Transform to absolute distance from nominal level: lower = better
