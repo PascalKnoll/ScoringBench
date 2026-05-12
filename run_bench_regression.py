@@ -57,6 +57,7 @@ TABPFN_VERSION = "realv2_5"
 MODEL_PATH_MAP = {
     "realv2_5": "tabpfn-v2.5-regressor-v2.5_real.ckpt",
     "v2_6": "tabpfn-v2.6-regressor-v2.6_default.ckpt",
+    "v3": "tabpfn-v3-regressor-v3_default.ckpt",
 }
 
 
@@ -134,6 +135,7 @@ dict_finetuned_models = {
 MODELS = {
     f"tabpfn_realv2_5": lambda: TabPFNWrapper(model_path=MODEL_PATH_MAP["realv2_5"]),
     f"tabpfn_v2_6": lambda: TabPFNWrapper(model_path=MODEL_PATH_MAP["v2_6"]),
+    f"tabpfn_v3": lambda: TabPFNWrapper(model_path=MODEL_PATH_MAP["v3"]),
     **dict_finetuned_models,
     "finetune_tabpfn_realv2_5_mse": lambda: FinetuneTabPFNWrapper(
         device="cuda",
