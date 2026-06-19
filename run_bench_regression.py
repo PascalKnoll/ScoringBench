@@ -30,6 +30,7 @@ from scoringbench.datasets import get_DATASETS_CONFIG, validate_datasets
 from scoringbench.runner import run_benchmark
 from scoringbench.utils import set_seed
 from scoringbench.wrappers import (
+    SynthefyWrapper,
     TabPFNWrapper,
     FinetuneTabPFNWrapper,
     FinetuneTabICLWrapper,
@@ -133,6 +134,7 @@ dict_finetuned_models = {
 }
 
 MODELS = {
+    "nori": lambda: SynthefyWrapper(),
     f"tabpfn_realv2_5": lambda: TabPFNWrapper(model_path=MODEL_PATH_MAP["realv2_5"]),
     f"tabpfn_v2_6": lambda: TabPFNWrapper(model_path=MODEL_PATH_MAP["v2_6"]),
     f"tabpfn_v3": lambda: TabPFNWrapper(model_path=MODEL_PATH_MAP["v3"]),

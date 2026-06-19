@@ -4,3 +4,8 @@
 *.png
 *.csv
 *.pdf
+
+# Generated/runtime artifacts
+datasets.json
+output_smoke/
+MONITOR_DONE
