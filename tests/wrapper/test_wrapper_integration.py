@@ -164,6 +164,11 @@ def _make_xgblss():
     return XGBLSSWrapper(n_quantiles=50, num_boost_round=100, distribution="Gaussian")
 
 
+def _make_nori():
+    from scoringbench.wrappers.synthefy import SynthefyWrapper
+    return SynthefyWrapper(device=_cuda_or_cpu())
+
+
 # Registry — add new entries here to include a model in all tests below
 # Each param is a (name, factory) tuple so the fixture can log the name
 # without relying on pytest internals that differ across scopes.
@@ -177,6 +182,7 @@ MODEL_FACTORIES = [
     pytest.param(("CrepesWrapper",            _make_crepes),         id="CrepesWrapper"),
     pytest.param(("CrepesWrapper+Mondrian",   _make_crepes_mondrian), id="CrepesWrapper+Mondrian"),
     pytest.param(("XGBLSSWrapper",            _make_xgblss),       id="XGBLSSWrapper"),
+    pytest.param(("SynthefyWrapper",          _make_nori),         id="SynthefyWrapper"),
 ]
 
 

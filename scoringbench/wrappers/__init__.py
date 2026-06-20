@@ -7,16 +7,17 @@ live in their own sub-modules:
     wrappers/tabpfn.py                — TabPFNWrapper
     wrappers/tabicl.py                — TabICLWrapper
     wrappers/xgb_vector.py            — XGBVectorWrapper
+    wrappers/synthefy.py              — SynthefyWrapper
 """
 
 from .base import DistributionPrediction, ProbabilisticWrapper
-from .synthefy import SynthefyWrapper
 
 # Heavy model wrappers: import if their backing library is present, else expose
 # the name as None so the package (and run_bench_regression.py's import list)
 # loads without every competitor's stack installed. Only the models actually
 # referenced in MODELS need their library at run time.
 _OPTIONAL = [
+    ("SynthefyWrapper", "synthefy"),
     ("TabPFNWrapper", "tabpfn"), ("FinetuneTabPFNWrapper", "tabpfn"),
     ("TabICLWrapper", "tabicl"), ("FinetuneTabICLWrapper", "tabicl"),
     ("XGBVectorWrapper", "xgb_vector"), ("XGBQuantileVectorWrapper", "xgb_vector"),

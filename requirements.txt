@@ -7,6 +7,3 @@ pytest
 pyarrow
 autorank
 openml
-# Nori wrapper (scoringbench/wrappers/synthefy.py) needs the output_type="full"
-# quantile API, added in synthefy-nori 0.6.0.
-synthefy-nori>=0.6.0

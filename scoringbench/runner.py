@@ -9,12 +9,14 @@ run_benchmark(datasets_config, model_factories, output_dir, n_folds, seed, sampl
 
 import json
 import traceback
+import gc
 from pathlib import Path
 from typing import Callable
 
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import KFold
+import torch
 
 from . import config as cfg
 from .datasets import load_dataset
@@ -168,6 +170,10 @@ def run_benchmark(
                     fold_result["fold"] = global_fold
                     save_fold_parquet(new_fold_data, output_dir, name, global_fold)
                     cv_results.append(fold_result)
+                    
+                    # Clear memory after each fold to prevent OOM errors
+                    gc.collect()
+                    torch.cuda.empty_cache()
 
             cv_results.sort(key=lambda d: d["fold"])
 
@@ -180,6 +186,11 @@ def run_benchmark(
         except Exception:
             print(f"\n✗ {name} FAILED")
             traceback.print_exc()
+        
+        finally:
+            # Clear memory between datasets to prevent OOM
+            gc.collect()
+            torch.cuda.empty_cache()
 
     # Return accumulated results
     final_df = pd.DataFrame(all_rows)

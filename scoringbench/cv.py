@@ -11,6 +11,8 @@ run_cv(X, y, model_factories, n_folds, seed) -> list[dict]
 """
 
 import time
+import traceback
+import gc
 from typing import Callable
 import json
 
@@ -74,39 +76,63 @@ def run_fold(
 
     for name, factory in model_factories.items():
         print(f"    [{name}] fitting …", flush=True)
-        model: ProbabilisticWrapper = factory()
-
-        t0 = time.time()
-        model.fit(X_train, y_train)
-        elapsed = time.time() - t0
-
         try:
-            dist = model.predict_distribution(X_test)
-            metrics = compute_metrics(dist, y_test_np)
-        except NotImplementedError:
-            y_pred = model.predict(X_test)
-            metrics = compute_point_metrics(y_test_np, y_pred)
-            for key in (
-                "crps", "log_score", "sharpness",
-                "coverage_90", "interval_score_90",
-                "coverage_95", "interval_score_95",
-                "crls", "cde_loss",
-                "wcrps_left", "wcrps_right", "wcrps_center",
-                *[f"energy_score_beta_{b}" for b in ENERGY_BETAS],
-            ):
-                metrics[key] = None
+            model: ProbabilisticWrapper = factory()
 
-        metrics["train_time"] = elapsed
+            t0 = time.time()
+            model.fit(X_train, y_train)
+            elapsed = time.time() - t0
 
-        del model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            try:
+                dist = model.predict_distribution(X_test)
+                metrics = compute_metrics(dist, y_test_np)
+            except NotImplementedError:
+                y_pred = model.predict(X_test)
+                metrics = compute_point_metrics(y_test_np, y_pred)
+                for key in (
+                    "crps", "log_score", "sharpness",
+                    "coverage_90", "interval_score_90",
+                    "coverage_95", "interval_score_95",
+                    "crls", "cde_loss",
+                    "wcrps_left", "wcrps_right", "wcrps_center",
+                    *[f"energy_score_beta_{b}" for b in ENERGY_BETAS],
+                ):
+                    metrics[key] = None
 
-        # Convert numpy types to native Python types for JSON serialization
-        metrics_display = {k: float(v) if v is not None else None 
-                          for k, v in metrics.items()}
-        print(f"    [{name}] {json.dumps(metrics_display, indent=2)}")
-        fold_results[name] = metrics
+            metrics["train_time"] = elapsed
+
+            del model
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            # Convert numpy types to native Python types for JSON serialization
+            metrics_display = {k: float(v) if v is not None else None 
+                              for k, v in metrics.items()}
+            print(f"    [{name}] {json.dumps(metrics_display, indent=2)}")
+            fold_results[name] = metrics
+            
+        except Exception as e:
+            print(f"    [{name}] FAILED with error: {type(e).__name__}: {str(e)}")
+            traceback.print_exc()
+            # Simple error record. Downstream scripts (autorank, aggregate) will see
+            # missing metric columns as NaN (pandas fills them automatically in parquet).
+            fold_results[name] = {
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "train_time": None,
+            }
+            
+            # Still try to clear memory even on error
+            try:
+                gc.collect()
+            except:
+                pass
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except:
+                pass
 
     return fold_results
 

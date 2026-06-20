@@ -109,6 +109,8 @@ class XGBVectorWrapper(ProbabilisticWrapper):
         self._bin_midpoints: np.ndarray | None = None
 
     def fit(self, X, y) -> "XGBVectorWrapper":
+        # Cast X to float32 to reduce memory usage
+        X = np.asarray(X, dtype=np.float32)
         y = np.asarray(y, dtype=float)
 
         # Uniform discretization over the observed range
@@ -139,6 +141,8 @@ class XGBVectorWrapper(ProbabilisticWrapper):
         return self
 
     def _get_probs(self, X) -> np.ndarray:
+        # Cast X to float32 to reduce memory usage
+        X = np.asarray(X, dtype=np.float32)
         dtest = xgb.DMatrix(X)
         # output_margin=True returns raw logits for all classes rather than
         # class-index scalars (which is what multi:softmax gives by default).
@@ -198,6 +202,8 @@ class XGBQuantileVectorWrapper(ProbabilisticWrapper):
         self._y_range: tuple[float, float] = (0.0, 1.0)
 
     def fit(self, X, y) -> "XGBQuantileVectorWrapper":
+        # Cast X to float32 to reduce memory usage
+        X = np.asarray(X, dtype=np.float32)
         y = np.asarray(y, dtype=float)
         self._y_range = (float(y.min()), float(y.max()))
 
@@ -217,6 +223,8 @@ class XGBQuantileVectorWrapper(ProbabilisticWrapper):
         return self
 
     def predict_distribution(self, X) -> DistributionPrediction:
+        # Cast X to float32 to reduce memory usage
+        X = np.asarray(X, dtype=np.float32)
         dtest = xgb.DMatrix(X)
         # q shape: (n_samples, 1000)
         q = self._model.predict(dtest)
@@ -260,6 +268,8 @@ class XGBQuantileVectorWrapper(ProbabilisticWrapper):
 
     def predict(self, X) -> np.ndarray:
         # High-precision mean directly from quantile particles
+        # Cast X to float32 to reduce memory usage
+        X = np.asarray(X, dtype=np.float32)
         dtest = xgb.DMatrix(X)
         q = self._model.predict(dtest)
         return np.mean(q, axis=1)
