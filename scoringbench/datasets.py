@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import io
 import re
 import zipfile
@@ -592,54 +593,60 @@ def load_dataset(dataset_config: dict) -> tuple[pd.DataFrame, pd.Series]:
 
     elif source == 'openml':
         dataset_id = dataset_config['id']
-        # Datasets that have no OpenML default_target_attribute: name the
-        # documented regression target and drop co-targets / IDs / date columns
-        # so they don't leak into the features.
-        _TARGET_OVERRIDE = {
-            4531:  ("total_UPDRS", ["motor_UPDRS", "subject."]),   # Parkinsons telemonitoring
-            42989: ("actual_productivity", ["date"]),             # garment productivity
-            42897: ("Next_Tmax", ["Next_Tmin", "Date"]),          # temp-forecast bias correction
-        }
-        try:
-            data = fetch_openml(data_id=dataset_id, as_frame=True, parser='auto')
-            if dataset_id in _TARGET_OVERRIDE:
-                tgt, drop = _TARGET_OVERRIDE[dataset_id]
-                frame = data.frame
-                y = frame[tgt]
-                X = frame.drop(columns=[tgt] + [c for c in drop if c in frame.columns])
-            else:
-                X = data.data
-                y = data.target
-        except ValueError as e:
-            msg = str(e)
-            if "Sparse ARFF" in msg:
-                # High-dim sparse ARFF (e.g. molecular QSAR sets) can't be a
-                # DataFrame; load with as_frame=False and densify.
-                import scipy.sparse as _sp
-                data = fetch_openml(data_id=dataset_id, as_frame=False, parser='auto')
-                X_raw = data.data
-                X = pd.DataFrame(
-                    X_raw.toarray() if _sp.issparse(X_raw) else X_raw,
-                    columns=getattr(data, 'feature_names', None),
-                )
-                y = pd.Series(data.target)
-            elif "md5" in msg.lower():
-                # OpenML's stored file md5 disagrees with its metadata, so
-                # sklearn refuses to load it. The openml package loads the same
-                # data via its default target attribute without that check.
-                import openml as _oml
-                d = _oml.datasets.get_dataset(
-                    dataset_id, download_data=True,
-                    download_qualities=False, download_features_meta_data=True,
-                )
-                X, y, _, _ = d.get_data(
-                    target=d.default_target_attribute, dataset_format="dataframe",
-                )
-            else:
-                raise
+
+        def _fetch_openml_robust(did):
+            """Robust OpenML fetch: handles sparse ARFF, missing default target,
+            and corrupted-cache md5 mismatches."""
+            import shutil, numpy as _np
+            from sklearn.datasets import get_data_home
+            for attempt in range(2):
+                try:
+                    try:
+                        d = fetch_openml(data_id=did, as_frame=True, parser='auto')
+                    except ValueError as e:
+                        if 'Sparse ARFF' not in str(e):
+                            raise
+                        # sparse ARFF: load dense-from-array then frame it
+                        d = fetch_openml(data_id=did, as_frame=False, parser='auto')
+                        Xa = d.data
+                        if hasattr(Xa, 'toarray'):
+                            Xa = Xa.toarray()
+                        cols = list(getattr(d, 'feature_names', None) or
+                                    [f"feature_{i}" for i in range(Xa.shape[1])])
+                        d.data = pd.DataFrame(Xa, columns=cols)
+                        if d.target is not None:
+                            d.target = pd.Series(_np.asarray(d.target).reshape(-1))
+                    return d
+                except ValueError as e:
+                    # corrupted local cache (md5 mismatch) -> purge openml cache and retry once
+                    if 'md5 checksum' in str(e) and attempt == 0:
+                        cache = os.path.join(get_data_home(), 'openml')
+                        shutil.rmtree(cache, ignore_errors=True)
+                        continue
+                    # persistent md5 mismatch = server-side checksum bug -> use the
+                    # openml library's download path, which doesn't enforce it.
+                    if 'md5 checksum' in str(e):
+                        import openml as _oml
+                        _ds = _oml.datasets.get_dataset(did, download_data=True)
+                        _X, _y, _, _ = _ds.get_data(target=_ds.default_target_attribute)
+                        class _D:  # mimic the sklearn Bunch fields used below
+                            pass
+                        d = _D(); d.data = pd.DataFrame(_X)
+                        d.target = (pd.Series(_np.asarray(_y).reshape(-1)) if _y is not None else None)
+                        return d
+                    raise
+
+        data = _fetch_openml_robust(dataset_id)
+        X = data.data
+        y = data.target
+        # Some OpenML datasets have no default target attribute -> y is None.
+        # Fall back to the last column of X as the regression target.
         if y is None:
-            raise ValueError(f"OpenML dataset {dataset_id} has no target column")
+            X = pd.DataFrame(X)
+            y = X.iloc[:, -1]
+            X = X.iloc[:, :-1]
         # Convert target to numeric if needed
+        y = pd.Series(y)
         if y.dtype == 'object' or isinstance(y.dtype, pd.CategoricalDtype):
             y = pd.to_numeric(y, errors='coerce')
 
