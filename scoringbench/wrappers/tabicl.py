@@ -149,11 +149,15 @@ class FinetuneTabICLWrapper(TabICLWrapper):
         eval_metric: str | None = None,
         random_state: int = 0,
         verbose: bool = False,
+        max_data_size: int = 10_000,
         **kwargs,
     ):
-        # Initialize the base class to set _ALPHAS and _N_GRID
-        super().__init__(**kwargs)
-        
+        # Set the distribution-grid attributes directly instead of calling
+        # super().__init__(), which would build a throwaway TabICLRegressor and
+        # reject finetune-only kwargs such as ``max_data_size``.
+        self._ALPHAS = np.linspace(0.005, 0.995, 200).tolist()   # 200 quantiles
+        self._N_GRID = len(self._ALPHAS)
+
         from tabicl import FinetunedTabICLRegressor
 
         # Replace self._model with the finetuned variant
@@ -168,5 +172,6 @@ class FinetuneTabICLWrapper(TabICLWrapper):
             eval_metric=eval_metric,
             random_state=random_state,
             verbose=verbose,
+            max_data_size=max_data_size,
             **kwargs,
         )

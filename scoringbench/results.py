@@ -90,12 +90,19 @@ def save_fold_parquet(fold_data: dict, output_dir: Path, dataset_name: str, fold
         # owns this file exclusively (one dataset per SLURM array task).
         if dest_parquet.exists():
             existing = pd.read_parquet(dest_parquet, engine=parquet_engine)
-            # Idempotency: skip if this fold was already written (e.g. resumed run)
-            already_written = (
-                (existing["fold"] == fold_idx_val)
-            ).any()
-            if already_written:
-                continue
+            fold_mask = existing["fold"] == fold_idx_val
+            if fold_mask.any():
+                # A row for this fold already exists. If it is an error record,
+                # replace it with the new (re-run) result. Otherwise keep the
+                # existing row for idempotency on resumed runs.
+                existing_row = existing[fold_mask].iloc[0]
+                prev_err = existing_row.get("error", None) if "error" in existing.columns else None
+                is_prev_error = prev_err is not None and not (
+                    isinstance(prev_err, float) and pd.isna(prev_err)
+                )
+                if not is_prev_error:
+                    continue
+                existing = existing[~fold_mask]
             combined = pd.concat([existing, row_df], ignore_index=True)
         else:
             combined = row_df

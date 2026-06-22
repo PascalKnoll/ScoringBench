@@ -123,6 +123,17 @@ def run_benchmark(
                                     row = matched.iloc[0].to_dict()
                                     for k in ("dataset", "model", "fold"):
                                         row.pop(k, None)
+                                    # If the stored row is an error record, do NOT
+                                    # treat the model as present — re-run this fold.
+                                    err = row.get("error", None)
+                                    if err is not None and not (
+                                        isinstance(err, float) and pd.isna(err)
+                                    ):
+                                        print(
+                                            f"  Re-running {model_name} for global "
+                                            f"fold #{global_fold} (previous error: {err})"
+                                        )
+                                        continue
                                     fold_result[model_name] = row
                                     models_present.append(model_name)
                             except Exception:
