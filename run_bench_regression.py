@@ -135,9 +135,9 @@ dict_finetuned_models = {
 
 MODELS = {
     "nori": lambda: SynthefyWrapper(),
-    f"tabpfn_realv2_5": lambda: TabPFNWrapper(model_path=MODEL_PATH_MAP["realv2_5"]),
-    f"tabpfn_v2_6": lambda: TabPFNWrapper(model_path=MODEL_PATH_MAP["v2_6"]),
-    f"tabpfn_v3": lambda: TabPFNWrapper(model_path=MODEL_PATH_MAP["v3"]),
+    f"tabpfn_realv2_5": lambda: TabPFNWrapper(model_path=MODEL_PATH_MAP["realv2_5"], ignore_pretraining_limits=True),
+    f"tabpfn_v2_6": lambda: TabPFNWrapper(model_path=MODEL_PATH_MAP["v2_6"], ignore_pretraining_limits=True),
+    f"tabpfn_v3": lambda: TabPFNWrapper(model_path=MODEL_PATH_MAP["v3"], ignore_pretraining_limits=True),
     **dict_finetuned_models,
     "finetune_tabpfn_realv2_5_mse": lambda: FinetuneTabPFNWrapper(
         device="cuda",
@@ -169,6 +169,7 @@ MODELS = {
         eval_metric="mse",
         random_state=0,
         verbose=True,
+        # max_data_size=100 #only for datasets which otherwise OOM with 48GB VRAM
     ),
     "tabiclv2": lambda: TabICLWrapper(),
     "crepes_tabiclv2": lambda: CrepesWrapper(
@@ -203,7 +204,7 @@ MODELS = {
         val_metric_name='multi_pinball(0.01,0.03,0.05,0.07,0.09,0.11,0.13,0.15,0.17,0.19,0.21,0.23,0.25,0.27,0.29,0.31,0.33,0.35,0.37,0.39,0.41,0.43,0.45,0.47,0.49,0.51,0.53,0.55,0.57,0.59,0.61,0.63,0.65,0.67,0.69,0.71,0.73,0.75,0.77,0.79,0.81,0.83,0.85,0.87,0.89,0.91,0.93,0.95,0.97,0.99)',
         n_quantiles=50,
         hpo_space_name='tabarena',
-        n_cv=8
+        n_cv=8,
     ),
     "pytabkit_realmlp_td": lambda: PytabkitRealMLPWrapper(
         train_metric_name='multi_pinball(0.01,0.03,0.05,0.07,0.09,0.11,0.13,0.15,0.17,0.19,0.21,0.23,0.25,0.27,0.29,0.31,0.33,0.35,0.37,0.39,0.41,0.43,0.45,0.47,0.49,0.51,0.53,0.55,0.57,0.59,0.61,0.63,0.65,0.67,0.69,0.71,0.73,0.75,0.77,0.79,0.81,0.83,0.85,0.87,0.89,0.91,0.93,0.95,0.97,0.99)',

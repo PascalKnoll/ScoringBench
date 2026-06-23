@@ -112,6 +112,17 @@ class XGBVectorWrapper(ProbabilisticWrapper):
         # Cast X to float32 to reduce memory usage
         X = np.asarray(X, dtype=np.float32)
         y = np.asarray(y, dtype=float)
+        
+        # Sanitize X: replace inf and nan with finite values
+        X = np.nan_to_num(X, nan=0.0, posinf=1e7, neginf=-1e7)
+        
+        # Sanitize y: remove any inf/nan values for training
+        valid_mask = np.isfinite(y)
+        X = X[valid_mask]
+        y = y[valid_mask]
+        
+        if len(y) == 0:
+            raise ValueError("No valid (finite) training samples after sanitization")
 
         # Uniform discretization over the observed range
         self._bin_edges = np.linspace(y.min(), y.max(), self.n_bins + 1)
@@ -124,7 +135,7 @@ class XGBVectorWrapper(ProbabilisticWrapper):
             self.n_bins - 1,
         )
 
-        dtrain = xgb.DMatrix(X, label=y_labels)
+        dtrain = xgb.DMatrix(X, label=y_labels, missing=np.nan)
 
         params = {
             **self._DEFAULT_PARAMS,
@@ -205,9 +216,21 @@ class XGBQuantileVectorWrapper(ProbabilisticWrapper):
         # Cast X to float32 to reduce memory usage
         X = np.asarray(X, dtype=np.float32)
         y = np.asarray(y, dtype=float)
+        
+        # Sanitize X: replace inf and nan with finite values
+        X = np.nan_to_num(X, nan=0.0, posinf=1e7, neginf=-1e7)
+        
+        # Sanitize y: remove any inf/nan values for training
+        valid_mask = np.isfinite(y)
+        X = X[valid_mask]
+        y = y[valid_mask]
+        
+        if len(y) == 0:
+            raise ValueError("No valid (finite) training samples after sanitization")
+        
         self._y_range = (float(y.min()), float(y.max()))
 
-        dtrain = xgb.DMatrix(X, label=y)
+        dtrain = xgb.DMatrix(X, label=y, missing=np.nan)
 
         params = {
             **self._DEFAULT_PARAMS,
