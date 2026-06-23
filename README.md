@@ -18,7 +18,7 @@ ScoringBench is a compact benchmarking suite for probabilistic regression on tab
 ## Quick overview — important scripts
 
 - `run_bench_regression.py`: run the benchmark (all datasets, models, CV folds). Use `--lite` for a fast smoke test and `--output_dir` to change the output path.
-- `autorank_leaderboard.py`: compute statistical rankings with critical-difference diagrams; generates JSON data and LaTeX tables in `output/figures/leaderboard/`.
+- `autorank_leaderboard.py`: compute statistical rankings with critical-difference diagrams; generates JSON data and LaTeX tables in `<output_dir>/figures/leaderboard/`. Use `--output_dir` to choose the input/output folder (default `output_3000`).
 - `plot_output.py`: generate summary and per-dataset tables/plots from benchmark outputs. Defaults are reasonable; use `--relative`, `--median`, or `--output` to customize.
 
 ## Related tools

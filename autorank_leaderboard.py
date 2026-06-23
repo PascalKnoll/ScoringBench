@@ -434,12 +434,12 @@ def save_merged_cd_data(out_dir, metric, autorank_rankedDF, autorank_result, mea
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output", "--output_dir", dest="output", default="output_3000",
+    parser.add_argument("--output_dir", default="output_3000",
                         help="Top-level output directory containing parquet files (default: output_3000)")
     parser.add_argument("--alpha", type=float, default=0.05, help="Significance level for statistical tests")
     args = parser.parse_args()
 
-    root = args.output
+    root = args.output_dir
     if not os.path.exists(root): return
 
     # Attempt to aggregate output/raw → output/ before analysis.
