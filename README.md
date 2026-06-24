@@ -43,7 +43,7 @@ Typical directory structure:
 4. python autorank_leaderboard.py
 5. Commit aggregated per-model Parquet files (`output/*.parquet`) and the generated JSON ranking files in `output/figures/leaderboard/` to git LFS. Since the output repository is separate from the main repository, push to both. This serves as a public ledger and allows traceability.
 6. Create a pull request to the ScoringBench repository for review; contributions that meet standards will be merged.
-7. Upon merge, https://scoringbench.bolt.host/ will automatically display the updated leaderboard; the data is also available in the repository.
+7. Upon merge, https://scoringbench.com will automatically display the updated leaderboard; the data is also available in the repository.
 
 ## Tests
 
