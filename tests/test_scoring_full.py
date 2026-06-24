@@ -24,6 +24,7 @@ from scoringbench.metrics import (
     compute_metrics,
     ENERGY_BETAS,
     DPD_BETAS,
+    COVERAGE_LEVELS,
 )
 
 # If PyTorch is installed but CUDA on this host is broken/unsupported, force
@@ -534,12 +535,13 @@ class TestPerSampleGrid:
         r = compute_scoring_rules(*persample)
         expected_keys = {
             "crps", "log_score", "sharpness",
-            "coverage_90", "interval_score_90",
-            "coverage_95", "interval_score_95",
             "crls", "cde_loss",
+            "pit_ks_stat", "pit_ks_pvalue",
             "wcrps_left", "wcrps_right", "wcrps_center",
             "dispersion",
         }
+        for cov in COVERAGE_LEVELS:
+            expected_keys |= {f"coverage_{cov}", f"interval_score_{cov}"}
         expected_keys |= {f"energy_score_beta_{b}" for b in ENERGY_BETAS}
         expected_keys |= {f"dpd_beta_{b}" for b in DPD_BETAS}
         assert expected_keys == set(r.keys())

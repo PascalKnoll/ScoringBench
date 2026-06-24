@@ -21,6 +21,7 @@ compute_scoring_rules(dist, y_true) -> dict
     Uses PyTorch on GPU when available; falls back to CPU otherwise.
 """
 
+import functools
 import logging
 import time
 
@@ -36,6 +37,40 @@ logger = logging.getLogger(__name__)
 # Energy score β values reported as additional metrics
 ENERGY_BETAS = [0.1, 0.3, 0.5, 0.7, 0.9, 1.0, 1.1, 1.3, 1.5, 1.7, 1.8, 1.9]
 DPD_BETAS = [0.0, 0.2, 0.5, 1.0]  # β values for Density Power Divergence scoring rule; 0.0 -> log-score (limit)
+# Central coverage levels (%) reported via coverage_{level} / interval_score_{level};
+# the corresponding significance level is alpha = 1 - level/100.
+COVERAGE_LEVELS = [20, 40, 60, 80, 90, 95]
+
+
+# ---------------------------------------------------------------------------
+# Numerical precision
+# ---------------------------------------------------------------------------
+
+def force_precision(dtype: torch.dtype = torch.float64):
+    """Decorator: upcast every floating-point tensor argument to ``dtype``.
+
+    Histogram scoring rules repeatedly form differences of large, nearly-equal
+    quantities — CRPS/energy ``term1 - term2``, variance ``E[X²] - E[X]²``,
+    CDE ``∫g² - 2g(y)``, DPD ``∫f^{1+β} - point``.  Evaluated in float32 these
+    suffer catastrophic cancellation (observed: CRPS down to ~ -33 on sharp,
+    large-scale histograms), violating mathematical guarantees such as
+    "energy score ≥ 0" or "variance ≥ 0".  Computing in float64 restores them.
+
+    Integer/index tensors (bin indices, sample indices) and non-tensor
+    arguments are passed through unchanged.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            def cast(x):
+                if isinstance(x, torch.Tensor) and x.is_floating_point():
+                    return x.to(dtype)
+                return x
+            new_args = tuple(cast(a) for a in args)
+            new_kwargs = {k: cast(v) for k, v in kwargs.items()}
+            return func(*new_args, **new_kwargs)
+        return wrapper
+    return decorator
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +96,7 @@ def compute_point_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     }
 
 
+@force_precision(torch.float64)
 def compute_dpd_scores(probas: torch.Tensor, bin_widths: torch.Tensor,
                        p_at_y: torch.Tensor, dz_at_y: torch.Tensor, betas: list, shared: bool) -> dict:
     """
@@ -82,7 +118,6 @@ def compute_dpd_scores(probas: torch.Tensor, bin_widths: torch.Tensor,
     # Prevent division by zero
     eps = 100*torch.finfo(probas.dtype).eps
     bw_safe = bw.clamp(min=eps)
-    eps = 100*torch.finfo(probas.dtype).eps
     g_y = (p_at_y / dz_at_y.clamp(min=eps)).clamp(min=eps)
 
     for beta in betas:
@@ -106,6 +141,7 @@ def compute_dpd_scores(probas: torch.Tensor, bin_widths: torch.Tensor,
 
     return results
 
+@force_precision(torch.float64)
 def compute_energy_score_histogram_corrected(
         probas: torch.Tensor, 
         bin_mids: torch.Tensor, 
@@ -116,6 +152,11 @@ def compute_energy_score_histogram_corrected(
         """
         Computes the Energy Score with exact uniform interval-correction.
         At beta=1.0, this mathematically equals the exact continuous CRPS.
+
+        Runs in float64 (see ``force_precision``): term1 - term2 is a difference
+        of large, nearly-equal values whose float32 cancellation can drive the
+        (non-negative) energy score / CRPS below zero. The per-sample clamp below
+        is a final guard restoring the mathematical guarantee score >= 0.
         """
         device = probas.device
         n_samples, n_bins = probas.shape
@@ -133,6 +174,14 @@ def compute_energy_score_histogram_corrected(
         u_r = right_edges - y[:, None]
 
         results = {}
+
+        # Non-negativity (and the clamp(min=0) guard below) requires ||·||^beta
+        # to be conditionally negative definite, which holds only for beta in
+        # (0, 2].  Outside this range the energy score can be legitimately
+        # negative and clamping would corrupt it — reject all betas up-front.
+        for beta in betas:
+            if not (0.0 < beta <= 2.0):
+                raise ValueError(f"Energy score beta must lie in (0, 2]; got beta={beta}.")
 
         for beta in betas:
             # ---- Term 1: E|X - y|^beta ----
@@ -176,8 +225,9 @@ def compute_energy_score_histogram_corrected(
                     term2_parts.append(0.5 * torch.einsum("ci,cij,cj->c", p_c, Dc, p_c))
                 term2 = torch.cat(term2_parts)
 
-            # Average over samples
-            results[f"energy_score_beta_{beta}"] = (term1 - term2).mean().item()
+            # Average over samples (clamp per-sample: energy score / CRPS is
+            # non-negative by definition; any sub-zero value is numerical error).
+            results[f"energy_score_beta_{beta}"] = (term1 - term2).clamp(min=0).mean().item()
 
         return results
 
@@ -191,10 +241,15 @@ def compute_scoring_rules(dist: DistributionPrediction, y_true: np.ndarray) -> d
                   wcrps_left, wcrps_right, wcrps_center,
                   energy_score_beta_{0.5,1.0,1.5,2.0}.
     """
-    probas     = dist.probas.astype(np.float32)
-    bin_edges  = dist.bin_edges.astype(np.float32)
-    bin_mids   = dist.bin_midpoints.astype(np.float32)
-    y          = np.asarray(y_true, dtype=np.float32)
+    # Compute every scoring rule in float64 (enforced by @force_precision on
+    # _compute_scoring_rules_torch).  Several rules form differences of large,
+    # nearly-equal terms (variance E[X²] - E[X]², CRPS term1 - term2,
+    # CDE ∫g² - 2g(y)); float32 cancellation there breaks guarantees such as
+    # variance >= 0 / CRPS >= 0.
+    probas     = torch.as_tensor(dist.probas)
+    bin_edges  = torch.as_tensor(dist.bin_edges)
+    bin_mids   = torch.as_tensor(dist.bin_midpoints)
+    y          = torch.as_tensor(np.asarray(y_true, dtype=float))
     shared     = bin_edges.ndim == 1
 
     logger.debug(
@@ -215,6 +270,7 @@ def compute_scoring_rules(dist: DistributionPrediction, y_true: np.ndarray) -> d
 # PyTorch (GPU) implementation helpers
 # ---------------------------------------------------------------------------
 
+@force_precision(torch.float64)
 def _interval(alpha, cdf, bin_edges, y, n_samples, n_bins, device, shared, y_bin, ns_idx):
     """Compute interval score and coverage for a given alpha level.
     
@@ -259,6 +315,7 @@ def _interval(alpha, cdf, bin_edges, y, n_samples, n_bins, device, shared, y_bin
     return sc.mean().item(), cov
 
 
+@force_precision(torch.float64)
 def compute_quantile_wcrps(cdf, bin_mids, y, n_samples, n_bins, device, shared):
     """Compute quantile-weighted CRPS with three weighting schemes.
     
@@ -312,6 +369,7 @@ def compute_quantile_wcrps(cdf, bin_mids, y, n_samples, n_bins, device, shared):
     }
 
 
+@force_precision(torch.float64)
 def compute_crls(cdf, bin_widths, y_bin, n_bins, device, eps, bw, shared):
     """Compute Continuous Ranked Logarithmic Score (CRLS).
     
@@ -352,6 +410,7 @@ def compute_crls(cdf, bin_widths, y_bin, n_bins, device, eps, bw, shared):
     return crls
 
 
+@force_precision(torch.float64)
 def compute_pit_ks(probas, cdf, bin_edges, bin_widths, y_bin, y, shared, ns_idx):
     """Compute PIT values and the Kolmogorov-Smirnov p-value vs. Uniform(0, 1).
 
@@ -404,6 +463,7 @@ def compute_pit_ks(probas, cdf, bin_edges, bin_widths, y_bin, y, shared, ns_idx)
     }
 
 
+@force_precision(torch.float64)
 def compute_cde_loss(probas, bin_widths, y_bin, y, bw, shared, ns_idx):
     """Compute Continuous Density Estimation (CDE) Loss.
     
@@ -463,7 +523,8 @@ def compute_cde_loss(probas, bin_widths, y_bin, y, bw, shared, ns_idx):
     return cde_loss
 
 
-def _compute_scoring_rules_torch(probas_np, bin_edges_np, bin_mids_np, y_np, shared):
+@force_precision(torch.float64)
+def _compute_scoring_rules_torch(probas, bin_edges, bin_mids, y, shared):
     """All scoring rules computed on GPU (or CPU) via PyTorch tensors.
 
     Note: `probas` are PMF values (probability mass per bin), i.e. for each
@@ -471,13 +532,16 @@ def _compute_scoring_rules_torch(probas_np, bin_edges_np, bin_mids_np, y_np, sha
     To obtain a density at a bin midpoint divide by the bin width:
     density_k = p_k / w_k. Integrating densities over the grid then
     recovers 1: ∑_k density_k * w_k = 1.
+
+    Inputs are float64 tensors (upcast by ``@force_precision``); here we only
+    move them onto the compute device.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    probas    = torch.as_tensor(probas_np,    dtype=torch.float32, device=device)
-    bin_edges = torch.as_tensor(bin_edges_np, dtype=torch.float32, device=device)
-    bin_mids  = torch.as_tensor(bin_mids_np,  dtype=torch.float32, device=device)
-    y         = torch.as_tensor(y_np,         dtype=torch.float32, device=device)
+    probas    = probas.to(device)
+    bin_edges = bin_edges.to(device)
+    bin_mids  = bin_mids.to(device)
+    y         = y.to(device)
 
     n_samples, n_bins = probas.shape
     ns_idx = torch.arange(n_samples, device=device)
@@ -522,13 +586,11 @@ def _compute_scoring_rules_torch(probas_np, bin_edges_np, bin_mids_np, y_np, sha
     dispersion = std_per_sample.std(unbiased=False).item()
 
     # ---- Interval scores (shared path: vectorised; non-shared: searchsorted) ----
-    # Coverage levels: 20, 40, 60, 80, 90, 95 (%)
-    # Corresponding alpha (significance) levels: 0.80, 0.60, 0.40, 0.20, 0.10, 0.05
-    coverage_levels = [20, 40, 60, 80, 90, 95]
-    alpha_levels = [0.80, 0.60, 0.40, 0.20, 0.10, 0.05]
+    # Coverage levels (%) from COVERAGE_LEVELS; significance alpha = 1 - level/100.
     interval_results = {}
-    
-    for cov_level, alpha in zip(coverage_levels, alpha_levels):
+
+    for cov_level in COVERAGE_LEVELS:
+        alpha = 1.0 - cov_level / 100.0
         is_alpha, cov_alpha = _interval(alpha, cdf, bin_edges, y, n_samples, n_bins, device, shared, y_bin, ns_idx)
         interval_results[f"coverage_{cov_level}"] = cov_alpha
         interval_results[f"interval_score_{cov_level}"] = is_alpha
