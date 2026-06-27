@@ -99,26 +99,31 @@ def regression_data():
 # ---------------------------------------------------------------------------
 
 def _make_xgb_vector():
+    pytest.importorskip("xgboost")
     from scoringbench.wrappers.xgb_vector import XGBVectorWrapper
     return XGBVectorWrapper(n_bins=50, num_boost_round=20, xgb_params={"device": _cuda_or_cpu()})
 
 
 def _make_xgb_quantile():
+    pytest.importorskip("xgboost")
     from scoringbench.wrappers.xgb_vector import XGBQuantileVectorWrapper
     return XGBQuantileVectorWrapper(n_bins=50, num_boost_round=20, xgb_params={"device": _cuda_or_cpu()})
 
 
 def _make_tabpfn():
+    pytest.importorskip("tabpfn")
     from scoringbench.wrappers.tabpfn import TabPFNWrapper
     return TabPFNWrapper(model_path="tabpfn-v2.5-regressor-v2.5_real.ckpt" if os.path.exists("tabpfn-v2.5-regressor-v2.5_real.ckpt") else None)
 
 
 def _make_tabicl():
+    pytest.importorskip("tabicl")
     from scoringbench.wrappers.tabicl import TabICLWrapper
     return TabICLWrapper(device=_cuda_or_cpu())
 
 
 def _make_pytabkit():
+    pytest.importorskip("pytabkit")
     from scoringbench.wrappers.pytabkit import PytabkitRealMLPWrapper
     return PytabkitRealMLPWrapper(        
         train_metric_name='multi_pinball(0.01,0.03,0.05,0.07,0.09,0.11,0.13,0.15,0.17,0.19,0.21,0.23,0.25,0.27,0.29,0.31,0.33,0.35,0.37,0.39,0.41,0.43,0.45,0.47,0.49,0.51,0.53,0.55,0.57,0.59,0.61,0.63,0.65,0.67,0.69,0.71,0.73,0.75,0.77,0.79,0.81,0.83,0.85,0.87,0.89,0.91,0.93,0.95,0.97,0.99)',
@@ -128,11 +133,13 @@ def _make_pytabkit():
 
 
 def _make_catboost_quantile():
+    pytest.importorskip("catboost")
     from scoringbench.wrappers.catboost_wrapper import CatBoostQuantileWrapper
     return CatBoostQuantileWrapper(n_quantiles=99, iterations=200)
 
 
 def _make_crepes():
+    pytest.importorskip("crepes")
     from scoringbench.wrappers.crepes_wrapper import CrepesWrapper
     from sklearn.ensemble import RandomForestRegressor
 
@@ -146,6 +153,7 @@ def _make_crepes():
 
 
 def _make_crepes_mondrian():
+    pytest.importorskip("crepes")
     from scoringbench.wrappers.crepes_wrapper import CrepesWrapper
     from sklearn.ensemble import RandomForestRegressor
 
@@ -160,13 +168,42 @@ def _make_crepes_mondrian():
 
 
 def _make_xgblss():
+    pytest.importorskip("xgboostlss")
     from scoringbench.wrappers.xgblss_wrapper import XGBLSSWrapper
     return XGBLSSWrapper(n_quantiles=50, num_boost_round=100, distribution="Gaussian")
 
 
 def _make_nori():
+    pytest.importorskip("synthefy_nori")
     from scoringbench.wrappers.synthefy import SynthefyWrapper
     return SynthefyWrapper(device=_cuda_or_cpu())
+
+
+def _make_cde(estimator):
+    """Build a zero-argument factory for a CDE estimator (uses its preset)."""
+    def factory():
+        pytest.importorskip("cde")
+        from scoringbench.wrappers.cde_wrapper import CDEWrapper
+        return CDEWrapper(estimator=estimator, n_grid=200)
+    return factory
+
+
+def _make_flexcode(regressor):
+    """Build a zero-argument factory for a FlexCode regressor (uses its preset)."""
+    def factory():
+        pytest.importorskip("flexcode")
+        from scoringbench.wrappers.flexcode_wrapper import FlexCodeWrapper
+        return FlexCodeWrapper(regressor=regressor, n_grid=200)
+    return factory
+
+
+def _make_surjectors(flow):
+    """Build a zero-argument factory for a Surjectors flow (uses its preset)."""
+    def factory():
+        pytest.importorskip("surjectors")
+        from scoringbench.wrappers.surjectors_wrapper import SurjectorsWrapper
+        return SurjectorsWrapper(flow=flow, n_grid=200)
+    return factory
 
 
 # Registry — add new entries here to include a model in all tests below
@@ -183,6 +220,24 @@ MODEL_FACTORIES = [
     pytest.param(("CrepesWrapper+Mondrian",   _make_crepes_mondrian), id="CrepesWrapper+Mondrian"),
     pytest.param(("XGBLSSWrapper",            _make_xgblss),       id="XGBLSSWrapper"),
     pytest.param(("SynthefyWrapper",          _make_nori),         id="SynthefyWrapper"),
+]
+
+# CDE (freelunchtheorem) estimators — one registry entry per maintained preset.
+MODEL_FACTORIES += [
+    pytest.param((f"CDEWrapper[{_est}]", _make_cde(_est)), id=f"CDEWrapper[{_est}]")
+    for _est in ("MDN", "NF")
+]
+
+# FlexCode basis-expansion CDE — one registry entry per regressor backend.
+MODEL_FACTORIES += [
+    pytest.param((f"FlexCodeWrapper[{_reg}]", _make_flexcode(_reg)), id=f"FlexCodeWrapper[{_reg}]")
+    for _reg in ("xgboost", "randomforest")
+]
+
+# Surjectors (JAX) conditional normalizing flow — one registry entry per flow.
+MODEL_FACTORIES += [
+    pytest.param((f"SurjectorsWrapper[{_flow}]", _make_surjectors(_flow)), id=f"SurjectorsWrapper[{_flow}]")
+    for _flow in ("maf",)
 ]
 
 

@@ -44,7 +44,16 @@ from scoringbench.wrappers import (
     PytabkitTabMHPOWrapper,
     CatBoostQuantileWrapper,
     CrepesWrapper,
+    NGBoostWrapper,
+    NFlowsWrapper,
+    BARTWrapper,
+    CDEWrapper,
+    FlexCodeWrapper,
+    SurjectorsWrapper,
 )
+from scoringbench.wrappers.cde_wrapper import CDE_PRESETS
+from scoringbench.wrappers.flexcode_wrapper import FLEXCODE_PRESETS
+from scoringbench.wrappers.surjectors_wrapper import SURJECTORS_PRESETS
 from xgboost import XGBRegressor
 from catboost import CatBoostRegressor
 
@@ -133,6 +142,21 @@ dict_finetuned_models = {
     for beta in FINETUNE_BETAS
 }
 
+dict_cde_models = {
+    f"cde_{_name}": (lambda n=_name: CDEWrapper(estimator=n, n_grid=200))
+    for _name in CDE_PRESETS
+}
+
+dict_flexcode_models = {
+    f"flexcode_{_name}": (lambda n=_name: FlexCodeWrapper(regressor=n, n_grid=200))
+    for _name in FLEXCODE_PRESETS
+}
+
+dict_surjectors_models = {
+    f"surjectors_{_name}": (lambda n=_name: SurjectorsWrapper(flow=n, n_grid=200))
+    for _name in SURJECTORS_PRESETS
+}
+
 MODELS = {
     "nori": lambda: SynthefyWrapper(),
     f"tabpfn_realv2_5": lambda: TabPFNWrapper(model_path=MODEL_PATH_MAP["realv2_5"], ignore_pretraining_limits=True),
@@ -169,7 +193,7 @@ MODELS = {
         eval_metric="mse",
         random_state=0,
         verbose=True,
-        # max_data_size=100 #only for datasets which otherwise OOM with 48GB VRAM
+        max_data_size=100 #only for datasets which otherwise OOM with 48GB VRAM
     ),
     "tabiclv2": lambda: TabICLWrapper(),
     "crepes_tabiclv2": lambda: CrepesWrapper(
@@ -219,7 +243,6 @@ MODELS = {
         hpo_space_name='tabarena-new',
         use_caruana_ensembling=True,
     ),
-    
     "crepes_xgb_difficulty": lambda: CrepesWrapper(
         base_model=XGBRegressor(n_estimators=100, random_state=0),
         n_quantiles=99,
@@ -244,7 +267,6 @@ MODELS = {
         use_difficulty_estimator=True,
         use_mondrian_categorizer=True,
     ),
-    
     "crepes_catboost_difficulty_mondrian": lambda: CrepesWrapper(
         base_model=CatBoostRegressor(iterations=100, verbose=False, random_state=0),
         n_quantiles=99,
@@ -253,6 +275,15 @@ MODELS = {
         use_difficulty_estimator=True,
         use_mondrian_categorizer=True,
     ),
+    "ngboost_gaussian": lambda: NGBoostWrapper(dist="normal", n_estimators=500, learning_rate=0.01, n_quantiles=99),
+    "nflows_rqs": lambda: NFlowsWrapper(
+        n_layers=4, hidden_features=64, num_bins=8,
+        n_epochs=300, batch_size=256, lr=1e-3, n_samples=300,
+    ),
+    "bart": lambda: BARTWrapper(num_trees=50, draws=150, tune=200, chains=2, cores=1),
+    **dict_cde_models,
+    **dict_flexcode_models,
+    **dict_surjectors_models,
 }
 
 

@@ -4,6 +4,7 @@
 *.png
 *.csv
 *.pdf
+slurm*.out
 
 # Generated/runtime artifacts
 datasets.json

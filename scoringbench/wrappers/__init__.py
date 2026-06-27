@@ -11,6 +11,12 @@ live in their own sub-modules:
 """
 
 from .base import DistributionPrediction, ProbabilisticWrapper
+from .sample_based import (  # noqa: F401
+    SampleBasedWrapper,
+    grid_density_to_distribution,
+    quantiles_to_distribution,
+    samples_to_distribution,
+)
 
 # Heavy model wrappers: import if their backing library is present, else expose
 # the name as None so the package (and run_bench_regression.py's import list)
@@ -25,6 +31,12 @@ _OPTIONAL = [
     ("CrepesWrapper", "crepes_wrapper"),
     ("PytabkitRealMLPWrapper", "pytabkit"), ("PytabkitRealMLPHPOWrapper", "pytabkit"),
     ("PytabkitTabMDWrapper", "pytabkit"), ("PytabkitTabMHPOWrapper", "pytabkit"),
+    ("NGBoostWrapper", "ngboost_wrapper"),
+    ("NFlowsWrapper", "nflows_wrapper"),
+    ("BARTWrapper", "bart_wrapper"),
+    ("CDEWrapper", "cde_wrapper"),
+    ("FlexCodeWrapper", "flexcode_wrapper"),
+    ("SurjectorsWrapper", "surjectors_wrapper"),
 ]
 for _name, _mod in _OPTIONAL:
     try:
@@ -37,6 +49,10 @@ __all__ = [
     "SynthefyWrapper",
     "DistributionPrediction",
     "ProbabilisticWrapper",
+    "SampleBasedWrapper",
+    "quantiles_to_distribution",
+    "samples_to_distribution",
+    "grid_density_to_distribution",
     "TabPFNWrapper",
     "FinetuneTabPFNWrapper",
     "TabICLWrapper",
@@ -50,4 +66,10 @@ __all__ = [
     "PytabkitTabMHPOWrapper",
     "CatBoostQuantileWrapper",
     "CrepesWrapper",
+    "NGBoostWrapper",
+    "NFlowsWrapper",
+    "BARTWrapper",
+    "CDEWrapper",
+    "FlexCodeWrapper",
+    "SurjectorsWrapper",
 ]

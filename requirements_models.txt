@@ -9,3 +9,10 @@ tabicl
 pytabkit
 crepes
 xgboostlss
+ngboost>=0.5.0
+nflows>=0.14
+pymc>=5.0
+pymc-bart>=0.11.0
+flexcode>=0.2.3
+cde>=1.0.1
+surjectors>=0.3.3  # pulls in jax, dm-haiku, distrax, optax
