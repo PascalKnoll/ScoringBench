@@ -179,6 +179,17 @@ def _make_nori():
     return SynthefyWrapper(device=_cuda_or_cpu())
 
 
+def _make_nori_30m():
+    pytest.importorskip("synthefy_nori")
+    from scoringbench.wrappers.synthefy import SynthefyWrapper
+    # Skip if a likely Nori API key is not present to avoid CI flakiness.
+    # import os
+    # if not os.environ.get("NORI_API_KEY"):
+    #     pytest.skip("NORI_API_KEY not set; skipping nori-30m integration test")
+    # Request the released nori-30m checkpoint via the public model identifier.
+    return SynthefyWrapper(device=_cuda_or_cpu(), model="nori-30m")
+
+
 def _make_cde(estimator):
     """Build a zero-argument factory for a CDE estimator (uses its preset)."""
     def factory():
@@ -220,6 +231,7 @@ MODEL_FACTORIES = [
     pytest.param(("CrepesWrapper+Mondrian",   _make_crepes_mondrian), id="CrepesWrapper+Mondrian"),
     pytest.param(("XGBLSSWrapper",            _make_xgblss),       id="XGBLSSWrapper"),
     pytest.param(("SynthefyWrapper",          _make_nori),         id="SynthefyWrapper"),
+    pytest.param(("SynthefyWrapper[nori-30m]", _make_nori_30m),    id="SynthefyWrapper[nori-30m]"),
 ]
 
 # CDE (freelunchtheorem) estimators — one registry entry per maintained preset.

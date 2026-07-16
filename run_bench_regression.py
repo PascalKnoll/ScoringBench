@@ -159,6 +159,7 @@ dict_surjectors_models = {
 
 MODELS = {
     "nori": lambda: SynthefyWrapper(),
+    "nori_30m": lambda: SynthefyWrapper(model="nori-30m"),
     f"tabpfn_realv2_5": lambda: TabPFNWrapper(model_path=MODEL_PATH_MAP["realv2_5"], ignore_pretraining_limits=True),
     f"tabpfn_v2_6": lambda: TabPFNWrapper(model_path=MODEL_PATH_MAP["v2_6"], ignore_pretraining_limits=True),
     f"tabpfn_v3": lambda: TabPFNWrapper(model_path=MODEL_PATH_MAP["v3"], ignore_pretraining_limits=True),
