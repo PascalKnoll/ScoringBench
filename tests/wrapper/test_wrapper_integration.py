@@ -217,6 +217,23 @@ def _make_surjectors(flow):
     return factory
 
 
+def _make_forest_diffusion():
+    """ForestDiffusion (XGBoost-based flow) — small/fast settings for CI."""
+    pytest.importorskip("ForestDiffusion")
+    from scoringbench.wrappers.forest_diffusion_wrapper import ForestDiffusionWrapper
+    return ForestDiffusionWrapper(
+        n_t=10,
+        duplicate_K=50,
+        diffusion_type="flow",
+        n_estimators=50,
+        max_depth=5,
+        n_jobs=-1,
+        n_samples=30,
+        sample_chunk=10,
+        random_state=0,
+    )
+
+
 # Registry — add new entries here to include a model in all tests below
 # Each param is a (name, factory) tuple so the fixture can log the name
 # without relying on pytest internals that differ across scopes.
@@ -232,6 +249,7 @@ MODEL_FACTORIES = [
     pytest.param(("XGBLSSWrapper",            _make_xgblss),       id="XGBLSSWrapper"),
     pytest.param(("SynthefyWrapper",          _make_nori),         id="SynthefyWrapper"),
     pytest.param(("SynthefyWrapper[nori-30m]", _make_nori_30m),    id="SynthefyWrapper[nori-30m]"),
+    pytest.param(("ForestDiffusionWrapper",   _make_forest_diffusion), id="ForestDiffusionWrapper"),
 ]
 
 # CDE (freelunchtheorem) estimators — one registry entry per maintained preset.

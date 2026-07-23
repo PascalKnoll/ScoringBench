@@ -47,6 +47,7 @@ from scoringbench.wrappers import (
     NGBoostWrapper,
     NFlowsWrapper,
     BARTWrapper,
+    ForestDiffusionWrapper,
     CDEWrapper,
     FlexCodeWrapper,
     SurjectorsWrapper,
@@ -282,6 +283,11 @@ MODELS = {
         n_epochs=300, batch_size=256, lr=1e-3, n_samples=300,
     ),
     "bart": lambda: BARTWrapper(num_trees=50, draws=150, tune=200, chains=2, cores=1),
+    "forest_diffusion_flow": lambda: ForestDiffusionWrapper(
+        n_t=25, duplicate_K=100, diffusion_type="flow",
+        n_estimators=100, max_depth=7, n_jobs=-1,
+        n_samples=100, sample_chunk=10, random_state=0
+    ),
     **dict_cde_models,
     **dict_flexcode_models,
     **dict_surjectors_models,

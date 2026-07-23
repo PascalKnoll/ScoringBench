@@ -122,7 +122,6 @@ def test_sample_based_timeout_is_respected():
     assert samples.shape[1] < 1000
     assert elapsed < 2.0
 
-
 # ---------------------------------------------------------------------------
 # Per-model integration tests (skip if library missing)
 # ---------------------------------------------------------------------------
@@ -161,6 +160,28 @@ def test_bart_integration():
 
     Xtr, ytr, Xte, yte = _make_data(n_train=200, n_test=80)
     model = BARTWrapper(num_trees=30, draws=150, tune=150, chains=2, cores=1)
+    model.fit(Xtr, ytr)
+    dist = model.predict_distribution(Xte)
+    _assert_learns(dist, yte)
+
+
+@pytest.mark.slow
+def test_forest_diffusion_integration():
+    pytest.importorskip("ForestDiffusion")
+    from scoringbench.wrappers.forest_diffusion_wrapper import ForestDiffusionWrapper
+
+    Xtr, ytr, Xte, yte = _make_data(n_train=200, n_test=60)
+    model = ForestDiffusionWrapper(
+        n_t=20,
+        duplicate_K=100,
+        diffusion_type="flow",
+        n_estimators=100,
+        max_depth=5,
+        n_jobs=-1,
+        n_samples=100,
+        sample_chunk=20,
+        random_state=0,
+    )
     model.fit(Xtr, ytr)
     dist = model.predict_distribution(Xte)
     _assert_learns(dist, yte)

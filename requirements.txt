@@ -1,4 +1,4 @@
-numpy
+numpy>=2.0,<2.3
 scikit-learn
 pandas
 tqdm
