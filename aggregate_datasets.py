@@ -90,6 +90,28 @@ def aggregate(raw_dir: Path, out_dir: Path) -> dict[str, int]:
         # Combine all datasets for this model
         combined = pd.concat(frames, ignore_index=True)
 
+        # Drop rows that only ran with errors (non-null `error`), and
+        # subsequently any dataset left with no successful rows at all.
+        n_err_rows = 0
+        dropped_datasets: list[str] = []
+        if "error" in combined.columns:
+            error_mask = combined["error"].notna()
+            n_err_rows = int(error_mask.sum())
+            if n_err_rows:
+                datasets_before = (
+                    set(combined["dataset"].unique())
+                    if "dataset" in combined.columns else set()
+                )
+                combined = combined[~error_mask].reset_index(drop=True)
+                if "dataset" in combined.columns:
+                    datasets_after = set(combined["dataset"].unique())
+                    dropped_datasets = sorted(datasets_before - datasets_after)
+
+        # Everything failed for this model — nothing worth writing.
+        if combined.empty:
+            print(f"  {model_name}.parquet  (all {n_err_rows} row(s) were errors — skipped)")
+            continue
+
         # Deduplicate: keep only one row per (dataset, fold) —
         # in case a dataset was partially re-run and appended.
         if {"dataset", "fold"}.issubset(combined.columns):
@@ -109,7 +131,17 @@ def aggregate(raw_dir: Path, out_dir: Path) -> dict[str, int]:
                     pass
 
         summary[model_name] = len(combined)
-        print(f"  {model_name}.parquet  ({len(combined)} rows from {len(dataset_files)} dataset(s))")
+        n_datasets = (
+            combined["dataset"].nunique()
+            if "dataset" in combined.columns else len(dataset_files)
+        )
+        msg = f"  {model_name}.parquet  ({len(combined)} rows from {n_datasets} dataset(s))"
+        if n_err_rows:
+            msg += f"  [dropped {n_err_rows} error row(s)"
+            if dropped_datasets:
+                msg += f", {len(dropped_datasets)} dataset(s) only errored: {', '.join(dropped_datasets)}"
+            msg += "]"
+        print(msg)
 
     return summary
 

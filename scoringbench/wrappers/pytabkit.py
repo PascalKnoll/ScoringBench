@@ -7,6 +7,7 @@ import numpy as np
 import re
 
 from .base import DistributionPrediction, ProbabilisticWrapper
+from .quantile_based import quantiles_to_distribution
 
 
 # Reduce noisy info logs from Lightning during benchmarking
@@ -188,31 +189,11 @@ class PytabkitRealMLPWrapper(ProbabilisticWrapper):
                             f"Unexpected quantiles shape {q.shape}; cannot reshape to (n_samples={n_samples}, n_quantiles={self.n_quantiles})"
                         )
 
-        # 1) Finite protection and monotonicity
-        q = np.nan_to_num(q, nan=np.nanmin(q), posinf=np.nanmax(q), neginf=np.nanmin(q))
-        q = np.sort(q, axis=1)
-
-        # 2) Per-sample bin edges: extend slightly beyond endpoints
-        left_w = np.maximum(q[:, 1] - q[:, 0], 1e-7)
-        right_w = np.maximum(q[:, -1] - q[:, -2], 1e-7)
-        bin_edges = np.concatenate(
-            [(q[:, 0] - left_w)[:, None], q, (q[:, -1] + right_w)[:, None]],
-            axis=1,
-        )
-
-        # 3) Masses per bin from alphas: [alpha0, diff(alpha), ..., 1-alpha_last]
-        masses = np.concatenate([[self._alphas[0]], np.diff(self._alphas), [1.0 - self._alphas[-1]]])
-        probas = np.broadcast_to(masses[None, :], (q.shape[0], len(masses))).copy()
-
-        bin_midpoints = (bin_edges[:, :-1] + bin_edges[:, 1:]) / 2
-        mean = np.sum(probas * bin_midpoints, axis=-1)
-
-        return DistributionPrediction(
-            probas=probas,
-            bin_edges=bin_edges,
-            bin_midpoints=bin_midpoints,
-            mean=mean,
-        )
+        # Finite protection: fall back to observed range of q (pytabkit has no
+        # stored y_range at this point).
+        finite = q[np.isfinite(q)]
+        y_range = (float(finite.min()), float(finite.max())) if finite.size else (0.0, 1.0)
+        return quantiles_to_distribution(q, self._alphas, y_range=y_range)
 
 
 class PytabkitRealMLPHPOWrapper(PytabkitRealMLPWrapper):
@@ -404,31 +385,11 @@ class PytabkitTabMDWrapper(ProbabilisticWrapper):
                             f"Unexpected quantiles shape {q.shape}; cannot reshape to (n_samples={n_samples}, n_quantiles={self.n_quantiles})"
                         )
 
-        # 1) Finite protection and monotonicity
-        q = np.nan_to_num(q, nan=np.nanmin(q), posinf=np.nanmax(q), neginf=np.nanmin(q))
-        q = np.sort(q, axis=1)
-
-        # 2) Per-sample bin edges: extend slightly beyond endpoints
-        left_w = np.maximum(q[:, 1] - q[:, 0], 1e-7)
-        right_w = np.maximum(q[:, -1] - q[:, -2], 1e-7)
-        bin_edges = np.concatenate(
-            [(q[:, 0] - left_w)[:, None], q, (q[:, -1] + right_w)[:, None]],
-            axis=1,
-        )
-
-        # 3) Masses per bin from alphas: [alpha0, diff(alpha), ..., 1-alpha_last]
-        masses = np.concatenate([[self._alphas[0]], np.diff(self._alphas), [1.0 - self._alphas[-1]]])
-        probas = np.broadcast_to(masses[None, :], (q.shape[0], len(masses))).copy()
-
-        bin_midpoints = (bin_edges[:, :-1] + bin_edges[:, 1:]) / 2
-        mean = np.sum(probas * bin_midpoints, axis=-1)
-
-        return DistributionPrediction(
-            probas=probas,
-            bin_edges=bin_edges,
-            bin_midpoints=bin_midpoints,
-            mean=mean,
-        )
+        # Finite protection: fall back to observed range of q (pytabkit has no
+        # stored y_range at this point).
+        finite = q[np.isfinite(q)]
+        y_range = (float(finite.min()), float(finite.max())) if finite.size else (0.0, 1.0)
+        return quantiles_to_distribution(q, self._alphas, y_range=y_range)
 
 
 class PytabkitTabMHPOWrapper(PytabkitTabMDWrapper):

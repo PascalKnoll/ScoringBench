@@ -11,11 +11,15 @@
 # Usage — sequential (all datasets in one job, original behaviour):
 #   sbatch run_benchmark.sbatch
 #
+# GPUs --gres=gpu:RTX-A6000:1  --gres=gpu:RTX-PRO-6000:1 --gres=gpu:H200:1 (smaller to larger)
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:RTX-A6000:1
-#SBATCH --mem=64G
+
+#SBATCH --mem=128G
 #SBATCH --time=120:00:00
 #SBATCH --job-name=scoringbench
+#SBATCH --output=slurm_logs/slurm-%j.out
+#SBATCH --error=slurm_logs/slurm-%j.err
 
 # Hardcoded sample size
 SAMPLE_SIZE="3000" #"3000" is original 

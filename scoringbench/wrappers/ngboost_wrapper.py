@@ -13,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 
 from .base import DistributionPrediction, ProbabilisticWrapper
-from .sample_based import quantiles_to_distribution
+from .quantile_based import quantiles_to_distribution
 
 _DISTNS = {
     "normal": "Normal",

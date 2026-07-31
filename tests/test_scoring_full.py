@@ -370,6 +370,8 @@ class TestDeltaDistribution:
 
     def test_log_score(self, delta):
         r = compute_scoring_rules(*delta)
+        # All the mass sits in the unit-width bin containing y, so f(y) = 1 and
+        # the log score is exactly 0 -- the best a histogram on this grid can do.
         assert r["log_score"] == pytest.approx(0.0, abs=1e-6)
 
     def test_sharpness(self, delta):
@@ -498,6 +500,7 @@ class TestAsymmetricDistribution:
 
     def test_log_score(self, asym):
         r = compute_scoring_rules(*asym)
+        # y = 0.5 falls in the first (unit-width) bin, so f(y) = 0.7 / 1.
         assert r["log_score"] == pytest.approx(-np.log(0.7), abs=1e-5)
 
     def test_sharpness(self, asym):

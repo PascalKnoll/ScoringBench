@@ -571,8 +571,94 @@ SKLEARN_LOADERS = {
 # ---------------------------------------------------------------------------
 # Main dataset loading function
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Processed-dataset cache
+# ---------------------------------------------------------------------------
+# The fully preprocessed (X, y) for each dataset is cached to disk as a single
+# parquet file, keyed by a hash of the dataset config. This means each dataset
+# is downloaded AND preprocessed at most once per machine; subsequent runs
+# (including the full validate_datasets sweep and every SLURM array task) read
+# straight from the local cache and never touch OpenML / PMLB / KEEL servers.
+#
+# Set the env var SCORINGBENCH_NO_CACHE=1 to bypass the cache entirely (e.g. to
+# force a fresh download).
+PROCESSED_CACHE_DIR = CACHE_DIR / 'processed'
+
+
+def _dataset_cache_key(dataset_config: dict) -> str:
+    """Stable hash of the fields that determine a dataset's processed (X, y)."""
+    import hashlib
+
+    key_fields = {
+        'source': dataset_config.get('source', 'openml'),
+        'id': dataset_config.get('id'),
+        'loader': dataset_config.get('loader'),
+        'url': dataset_config.get('url'),
+        'target_col': dataset_config.get('target_col'),
+        'name': dataset_config.get('name'),
+    }
+    blob = json.dumps(key_fields, sort_keys=True, default=str)
+    return hashlib.sha1(blob.encode('utf-8')).hexdigest()[:16]
+
+
+def _read_processed_cache(key: str):
+    """Return cached (X, y) for ``key`` or ``None`` if absent/unreadable."""
+    path = PROCESSED_CACHE_DIR / f"{key}.parquet"
+    if not path.exists():
+        return None
+    try:
+        df = pd.read_parquet(path)
+        y = df['__target__']
+        X = df.drop(columns=['__target__'])
+        return X, y
+    except Exception:
+        # Corrupt/partial cache file -> ignore and re-download.
+        return None
+
+
+def _write_processed_cache(key: str, X: pd.DataFrame, y: pd.Series) -> None:
+    """Atomically persist the processed (X, y) to the parquet cache."""
+    try:
+        PROCESSED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        df = X.copy()
+        df['__target__'] = y.values
+        # Parquet requires string column names.
+        df.columns = [str(c) for c in df.columns]
+        path = PROCESSED_CACHE_DIR / f"{key}.parquet"
+        tmp = path.with_suffix('.parquet.tmp')
+        df.to_parquet(tmp, index=False)
+        os.replace(tmp, path)
+    except Exception as e:
+        # Caching is best-effort; never fail the benchmark over a cache write.
+        print(f"  [cache] warning: could not cache dataset: {str(e)[:80]}")
+
+
 def load_dataset(dataset_config: dict) -> tuple[pd.DataFrame, pd.Series]:
-    """Load and preprocess a dataset from any supported source.
+    """Load and preprocess a dataset, using an on-disk cache when available.
+
+    On a cache miss the dataset is downloaded and preprocessed via
+    :func:`_load_dataset_uncached`, then the processed (X, y) is written to
+    ``PROCESSED_CACHE_DIR`` so future runs (and other SLURM tasks) never
+    re-download it. Set ``SCORINGBENCH_NO_CACHE=1`` to bypass the cache.
+
+    Supported sources: sklearn, openml, pmlb, keel.
+    """
+    if os.environ.get('SCORINGBENCH_NO_CACHE'):
+        return _load_dataset_uncached(dataset_config)
+
+    key = _dataset_cache_key(dataset_config)
+    cached = _read_processed_cache(key)
+    if cached is not None:
+        X, y = cached
+        return pd.DataFrame(X), pd.Series(y)
+
+    X, y = _load_dataset_uncached(dataset_config)
+    _write_processed_cache(key, X, y)
+    return X, y
+
+
+def _load_dataset_uncached(dataset_config: dict) -> tuple[pd.DataFrame, pd.Series]:
+    """Load and preprocess a dataset from any supported source (no cache).
 
     Supported sources: sklearn, openml, pmlb, keel.
     """

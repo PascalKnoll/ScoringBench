@@ -6,6 +6,7 @@ import numpy as np
 import xgboost as xgb
 
 from .base import DistributionPrediction, ProbabilisticWrapper
+from .quantile_based import quantiles_to_distribution
 
 
 class XGBLSSWrapper(ProbabilisticWrapper):
@@ -130,43 +131,4 @@ class XGBLSSWrapper(ProbabilisticWrapper):
         
         # Get quantile predictions
         q = self._get_quantiles(X)
-
-        # Finite-value protection
-        if not np.all(np.isfinite(q)):
-            q = np.nan_to_num(
-                q,
-                nan=self._y_range[0],
-                posinf=self._y_range[1],
-                neginf=self._y_range[0],
-            )
-
-        # Enforce strict monotonicity via sorting
-        q = np.sort(q, axis=1)
-
-        n_samples = q.shape[0]
-
-        # Construct per-sample bin edges: extend slightly beyond the outermost quantiles
-        left_w = np.maximum(q[:, 1] - q[:, 0], 1e-7)
-        right_w = np.maximum(q[:, -1] - q[:, -2], 1e-7)
-
-        # bin_edges shape: (n_samples, n_quantiles + 1)
-        bin_edges = np.concatenate(
-            [(q[:, 0] - left_w)[:, None], q, (q[:, -1] + right_w)[:, None]],
-            axis=1,
-        )
-
-        # Mass per bin: alpha_0, diff(alphas), 1 - alpha_last
-        masses = np.concatenate(
-            [[self._alphas[0]], np.diff(self._alphas), [1.0 - self._alphas[-1]]]
-        )
-        probas = np.broadcast_to(masses[None, :], (n_samples, len(masses))).copy()
-
-        bin_midpoints = (bin_edges[:, :-1] + bin_edges[:, 1:]) / 2
-        mean = np.sum(probas * bin_midpoints, axis=-1)
-
-        return DistributionPrediction(
-            probas=probas,
-            bin_edges=bin_edges,
-            bin_midpoints=bin_midpoints,
-            mean=mean,
-        )
+        return quantiles_to_distribution(q, self._alphas, y_range=self._y_range)

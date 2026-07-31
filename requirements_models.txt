@@ -17,3 +17,4 @@ ForestDiffusion>=1.0.6  # XGBoost-based tabular diffusion/flow generative model 
 flexcode>=0.2.3
 cde>=1.0.1
 surjectors>=0.3.3  # pulls in jax, dm-haiku, distrax, optax
+exaonetabular @ git+https://github.com/LGAI-Research/EXAONE-Tabular.git

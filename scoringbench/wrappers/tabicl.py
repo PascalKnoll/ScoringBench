@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from .base import DistributionPrediction, ProbabilisticWrapper
+from .quantile_based import quantiles_to_distribution
 
 import sys
 from pathlib import Path
@@ -38,7 +39,6 @@ class TabICLWrapper(ProbabilisticWrapper):
         from tabicl import TabICLRegressor
         self._model = TabICLRegressor(**kwargs)
         self._ALPHAS = np.linspace(0.005, 0.995, 200).tolist()   # 200 quantiles
-        self._N_GRID = len(self._ALPHAS)                                         # regular z-grid bins per sample
 
     def fit(self, X, y) -> "TabICLWrapper":
         self._model.fit(X, y)
@@ -70,65 +70,13 @@ class TabICLWrapper(ProbabilisticWrapper):
         # 1. Enforce monotonicity by sorting
         q = np.sort(q, axis=1)
 
-        n_samples = q.shape[0]
-        alphas = np.array(self._ALPHAS, dtype=float)
-        # Extend with boundary CDF values (0 at left tail, 1 at right tail)
-        alphas_ext = np.concatenate([[0.0], alphas, [1.0]])
-
-        # Determine per-sample regular grid size: prefer explicit _N_GRID
-        # (set when __init__ is run), otherwise derive from _ALPHAS for
-        # test instances created via __new__ that only set `_ALPHAS`.
-        n_grid = getattr(self, "_N_GRID", None)
-        if n_grid is None:
-            n_grid = len(alphas)
-            # Cache derived grid size so tests and callers can inspect it
-            try:
-                self._N_GRID = int(n_grid)
-            except Exception:
-                pass
-        all_bin_edges = np.empty((n_samples, n_grid + 1), dtype=np.float32)
-        all_probas    = np.empty((n_samples, n_grid),     dtype=np.float32)
-
-        for i in range(n_samples):
-            qi = q[i]
-
-            # Tail extension: use neighbouring inter-quantile gap
-            left_w  = max(qi[1]  - qi[0],  1e-6)
-            right_w = max(qi[-1] - qi[-2], 1e-6)
-            z_min = qi[0]  - left_w
-            z_max = qi[-1] + right_w
-
-            # 2. Regular per-sample z-grid
-            z_edges = np.linspace(z_min, z_max, n_grid + 1)
-
-            # Anchor quantiles with boundary values
-            q_ext = np.concatenate([[z_min], qi, [z_max]])
-
-            # 3. Interpolate CDF at bin edges
-            cdf_at_edges = np.interp(z_edges, q_ext, alphas_ext)
-
-            # 4. Density = dCDF/dz; clamp ≥ 0 and convert to masses
-            bin_widths = np.diff(z_edges)
-            masses = np.diff(cdf_at_edges)          # = density * dz
-            masses = np.maximum(masses, 0.0)        # 5. Clamp non-negative
-
-            # 6. Renormalize
-            total = masses.sum()
-            if total > 0:
-                masses /= total
-
-            all_bin_edges[i] = z_edges.astype(np.float32)
-            all_probas[i]    = masses.astype(np.float32)
-
-        bin_midpoints = (all_bin_edges[:, :-1] + all_bin_edges[:, 1:]) / 2
-        mean = (all_probas * bin_midpoints).sum(axis=-1)
-
-        return DistributionPrediction(
-            probas=all_probas,
-            bin_edges=all_bin_edges,
-            bin_midpoints=bin_midpoints,
-            mean=mean,
-        )
+        # 2. Convert to a DistributionPrediction using the *shared* quantile ->
+        #    distribution mapping (regular per-sample z-grid, CDF interpolated
+        #    at the grid edges), exactly like the other quantile-based wrappers
+        #    (CatBoost / XGB-quantile / NGBoost), so every quantile model is
+        #    discretized identically.
+        alphas = np.asarray(self._ALPHAS, dtype=float)
+        return quantiles_to_distribution(q, alphas)
 
 class FinetuneTabICLWrapper(TabICLWrapper):
     """Wraps a finetuned TabICL regressor.
@@ -156,7 +104,6 @@ class FinetuneTabICLWrapper(TabICLWrapper):
         # super().__init__(), which would build a throwaway TabICLRegressor and
         # reject finetune-only kwargs such as ``max_data_size``.
         self._ALPHAS = np.linspace(0.005, 0.995, 200).tolist()   # 200 quantiles
-        self._N_GRID = len(self._ALPHAS)
 
         from tabicl import FinetunedTabICLRegressor
 

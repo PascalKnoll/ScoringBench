@@ -51,6 +51,7 @@ from scoringbench.wrappers import (
     CDEWrapper,
     FlexCodeWrapper,
     SurjectorsWrapper,
+    EXAONETabularWrapper,
 )
 from scoringbench.wrappers.cde_wrapper import CDE_PRESETS
 from scoringbench.wrappers.flexcode_wrapper import FLEXCODE_PRESETS
@@ -138,7 +139,7 @@ FINETUNE_BETAS = [
     "cde",
 ]
 
-dict_finetuned_models = {
+dict_finetuned_tabpfn_models = {
     f"finetune_tabpfn_{TABPFN_VERSION}_{beta}": _create_finetune_model_tabpfn(beta, TABPFN_VERSION)
     for beta in FINETUNE_BETAS
 }
@@ -158,13 +159,14 @@ dict_surjectors_models = {
     for _name in SURJECTORS_PRESETS
 }
 
+#Hint: comment models out which you do not want to run locally
 MODELS = {
     "nori": lambda: SynthefyWrapper(),
     "nori_30m": lambda: SynthefyWrapper(model="nori-30m"),
     f"tabpfn_realv2_5": lambda: TabPFNWrapper(model_path=MODEL_PATH_MAP["realv2_5"], ignore_pretraining_limits=True),
     f"tabpfn_v2_6": lambda: TabPFNWrapper(model_path=MODEL_PATH_MAP["v2_6"], ignore_pretraining_limits=True),
     f"tabpfn_v3": lambda: TabPFNWrapper(model_path=MODEL_PATH_MAP["v3"], ignore_pretraining_limits=True),
-    **dict_finetuned_models,
+    **dict_finetuned_tabpfn_models,
     "finetune_tabpfn_realv2_5_mse": lambda: FinetuneTabPFNWrapper(
         device="cuda",
         epochs=N_EPOCHS,
@@ -195,9 +197,10 @@ MODELS = {
         eval_metric="mse",
         random_state=0,
         verbose=True,
-        max_data_size=100 #only for datasets which otherwise OOM with 48GB VRAM
+        # # # max_data_size=100 #only for datasets which otherwise OOM with 48GB VRAM, potentially with just 1 estimator
     ),
     "tabiclv2": lambda: TabICLWrapper(),
+    "exaonetabular": lambda: EXAONETabularWrapper(device="cuda:0"),
     "crepes_tabiclv2": lambda: CrepesWrapper(
         # Use raw TabICL regressor from the tabicl package as base_model
         base_model=__import__("tabicl").TabICLRegressor(),
@@ -216,10 +219,11 @@ MODELS = {
         use_mondrian_categorizer=True,
         mondrian_no_bins=10,
     ),
-    "xgb_vector": lambda: XGBVectorWrapper(n_bins=50, num_boost_round=100),
-    "xgb_vector_quantile": lambda: XGBQuantileVectorWrapper(n_bins=50, num_boost_round=100),
+    "xgb_vector": lambda: XGBVectorWrapper(n_bins=50, num_boost_round=100), #xgb_params={"device": "cpu"}
+    "xgb_vector_quantile": lambda: XGBQuantileVectorWrapper(n_bins=50, num_boost_round=100), #xgb_params={"device": "cpu"}
     "catboost_quantile": lambda: CatBoostQuantileWrapper(n_quantiles=99, iterations=1000),
     "xgblss_Gaussian": lambda: XGBLSSWrapper(n_quantiles=100, num_boost_round=100, distribution="Gaussian"),
+
     "tabm_d": lambda: PytabkitTabMDWrapper(
         train_metric_name='multi_pinball(0.01,0.03,0.05,0.07,0.09,0.11,0.13,0.15,0.17,0.19,0.21,0.23,0.25,0.27,0.29,0.31,0.33,0.35,0.37,0.39,0.41,0.43,0.45,0.47,0.49,0.51,0.53,0.55,0.57,0.59,0.61,0.63,0.65,0.67,0.69,0.71,0.73,0.75,0.77,0.79,0.81,0.83,0.85,0.87,0.89,0.91,0.93,0.95,0.97,0.99)',
         val_metric_name='multi_pinball(0.01,0.03,0.05,0.07,0.09,0.11,0.13,0.15,0.17,0.19,0.21,0.23,0.25,0.27,0.29,0.31,0.33,0.35,0.37,0.39,0.41,0.43,0.45,0.47,0.49,0.51,0.53,0.55,0.57,0.59,0.61,0.63,0.65,0.67,0.69,0.71,0.73,0.75,0.77,0.79,0.81,0.83,0.85,0.87,0.89,0.91,0.93,0.95,0.97,0.99)',
@@ -245,6 +249,8 @@ MODELS = {
         hpo_space_name='tabarena-new',
         use_caruana_ensembling=True,
     ),
+
+
     "crepes_xgb_difficulty": lambda: CrepesWrapper(
         base_model=XGBRegressor(n_estimators=100, random_state=0),
         n_quantiles=99,
@@ -278,16 +284,18 @@ MODELS = {
         use_mondrian_categorizer=True,
     ),
     "ngboost_gaussian": lambda: NGBoostWrapper(dist="normal", n_estimators=500, learning_rate=0.01, n_quantiles=99),
+    
     "nflows_rqs": lambda: NFlowsWrapper(
         n_layers=4, hidden_features=64, num_bins=8,
         n_epochs=300, batch_size=256, lr=1e-3, n_samples=300,
     ),
-    "bart": lambda: BARTWrapper(num_trees=50, draws=150, tune=200, chains=2, cores=1),
+    "pymc_bart": lambda: BARTWrapper(num_trees=50, draws=150, tune=200, chains=2, cores=1),
     "forest_diffusion_flow": lambda: ForestDiffusionWrapper(
         n_t=25, duplicate_K=100, diffusion_type="flow",
         n_estimators=100, max_depth=7, n_jobs=-1,
         n_samples=100, sample_chunk=10, random_state=0
     ),
+
     **dict_cde_models,
     **dict_flexcode_models,
     **dict_surjectors_models,

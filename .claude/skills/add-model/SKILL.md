@@ -101,8 +101,8 @@ and lists the reference file(s) for each. In short:
    (`grid_density_to_distribution`, or a direct `DistributionPrediction`). See
    `xgb_vector.py`, `cde_wrapper.py`, `flexcode_wrapper.py`.
 2. **Per-observation PMF grid** — 2-D grid from per-sample quantiles
-   (`quantiles_to_distribution`). See `ngboost_wrapper.py`, `catboost_wrapper.py`,
-   `crepes_wrapper.py`.
+   (`quantiles_to_distribution`, in `quantile_based.py`). See `ngboost_wrapper.py`,
+   `catboost_wrapper.py`, `crepes_wrapper.py`.
 3. **Sample-based** — subclass `SampleBasedWrapper`, implement `_draw_samples`.
    See `nflows_wrapper.py`, `bart_wrapper.py`.
 

@@ -22,7 +22,7 @@ import torch
 from sklearn.model_selection import KFold
 from sklearn.impute import SimpleImputer
 
-from .metrics import compute_metrics, compute_point_metrics, ENERGY_BETAS
+from .metrics import compute_metrics, compute_point_metrics, ENERGY_BETAS, DPD_BETAS
 from .wrappers import ProbabilisticWrapper
 
 
@@ -96,6 +96,7 @@ def run_fold(
                     "crls", "cde_loss",
                     "wcrps_left", "wcrps_right", "wcrps_center",
                     *[f"energy_score_beta_{b}" for b in ENERGY_BETAS],
+                    *[f"dpd_beta_{b}" for b in DPD_BETAS],
                 ):
                     metrics[key] = None
 

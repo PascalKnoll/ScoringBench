@@ -48,17 +48,19 @@ def test_tabicl_wrapper_predict_distribution_conversion():
 
     assert isinstance(dist, DistributionPrediction)
     assert dist.probas.shape[0] == 2
-    # bin_edges may be shared (1-D) or per-sample (2-D)
-    expected_edges = w._N_GRID + 1
-    if dist.bin_edges.ndim == 1:
-        assert dist.bin_edges.shape[0] == expected_edges
-    else:
-        assert dist.bin_edges.shape == (2, expected_edges)
-    expected_mids = expected_edges - 1
-    if dist.bin_midpoints.ndim == 1:
-        assert dist.bin_midpoints.shape[0] == expected_mids
-    else:
-        assert dist.bin_midpoints.shape == (2, expected_mids)
+
+    # TabICL uses the shared quantile->distribution mapping
+    # (``quantiles_to_distribution``): the predicted quantiles are the bin
+    # edges, so K levels give K-1 bins on a per-sample (2-D) grid.
+    n_bins = len(w._ALPHAS) - 1
+    assert dist.probas.shape == (2, n_bins)
+    assert dist.bin_edges.shape == (2, n_bins + 1)
+    assert dist.bin_midpoints.shape == (2, n_bins)
+
+    # Each row is a valid PMF on a non-decreasing grid.
+    assert np.allclose(dist.probas.sum(axis=1), 1.0)
+    assert np.all(dist.probas >= 0.0)
+    assert np.all(np.diff(dist.bin_edges, axis=1) >= 0)
 
 
 def test_xgb_vector_wrapper_predicts_and_distribution():
@@ -88,6 +90,9 @@ def test_xgb_quantile_vector_wrapper_predict_distribution():
     w = XGBQuantileVectorWrapper.__new__(XGBQuantileVectorWrapper)
     # small alpha grid for testing
     w._alphas = np.array([0.2, 0.5, 0.8])
+    # __new__ bypasses __init__, so set the range that predict_distribution
+    # forwards to quantiles_to_distribution (default is (0.0, 1.0)).
+    w._y_range = (0.0, 1.0)
 
     class FakeModel:
         def predict(self, *args, **kwargs):
@@ -100,9 +105,9 @@ def test_xgb_quantile_vector_wrapper_predict_distribution():
     dist = w.predict_distribution(X)
 
     assert isinstance(dist, DistributionPrediction)
-    assert dist.probas.shape == (2, len(w._alphas) + 1)
+    assert dist.probas.shape == (2, len(w._alphas) - 1)
     # bin_edges can be shared (1-D) or per-sample (2-D)
-    expected_edges = len(w._alphas) + 2
+    expected_edges = len(w._alphas)
     if dist.bin_edges.ndim == 1:
         assert dist.bin_edges.shape[0] == expected_edges
     else:

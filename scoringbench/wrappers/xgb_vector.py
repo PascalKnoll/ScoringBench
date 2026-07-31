@@ -6,6 +6,7 @@ import numpy as np
 import xgboost as xgb
 
 from .base import DistributionPrediction, ProbabilisticWrapper
+from .quantile_based import quantiles_to_distribution
 
 
 def crps_objective(preds, dtrain):
@@ -249,45 +250,9 @@ class XGBQuantileVectorWrapper(ProbabilisticWrapper):
         # Cast X to float32 to reduce memory usage
         X = np.asarray(X, dtype=np.float32)
         dtest = xgb.DMatrix(X)
-        # q shape: (n_samples, 1000)
+        # q shape: (n_samples, n_bins)
         q = self._model.predict(dtest)
-        
-        # 1. Finite-value protection
-        if not np.all(np.isfinite(q)):
-            q = np.nan_to_num(q, nan=self._y_range[0], 
-                             posinf=self._y_range[1], neginf=self._y_range[0])
-        
-        # 2. Strict monotonicity (Resort)
-        q = np.sort(q, axis=1)
-        n_samples = q.shape[0]
-
-        # 3. Construct Per-Sample Bin Edges
-        # We extend the edges slightly beyond the min/max quantiles to 
-        # cover the full probability mass [0, 1].
-        left_w = np.maximum(q[:, 1] - q[:, 0], 1e-7)
-        right_w = np.maximum(q[:, -1] - q[:, -2], 1e-7)
-        
-        # bin_edges shape: (n_samples, n_quantiles + 1)
-        bin_edges = np.concatenate(
-            [(q[:, 0] - left_w)[:, None], q, (q[:, -1] + right_w)[:, None]], 
-            axis=1
-        )
-        
-        # 4. Construct Probabilities (Mass per Bin)
-        # mass_0 = alpha_0, mass_i = alpha_i - alpha_{i-1}, mass_last = 1 - alpha_last
-        masses = np.concatenate([[self._alphas[0]], np.diff(self._alphas), [1.0 - self._alphas[-1]]])
-        probas = np.broadcast_to(masses[None, :], (n_samples, len(masses))).copy()
-
-        # 5. Midpoints and Mean
-        bin_midpoints = (bin_edges[:, :-1] + bin_edges[:, 1:]) / 2
-        mean = np.sum(probas * bin_midpoints, axis=-1)
-
-        return DistributionPrediction(
-            probas=probas,
-            bin_edges=bin_edges,
-            bin_midpoints=bin_midpoints,
-            mean=mean,
-        )
+        return quantiles_to_distribution(q, self._alphas, y_range=self._y_range)
 
     def predict(self, X) -> np.ndarray:
         # High-precision mean directly from quantile particles

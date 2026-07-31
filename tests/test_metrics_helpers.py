@@ -10,8 +10,21 @@ from scoringbench.metrics import (
     compute_quantile_wcrps,
     compute_crls,
     compute_cde_loss,
+    unified_bin_density,
     compute_energy_score_histogram_corrected,
 )
+
+
+def _g_y(probas, bin_widths, y_bin, shared):
+    """Pointwise predictive density f(y), matching the production path.
+
+    ``compute_cde_loss`` takes the pre-computed pointwise density ``g_y``
+    (the same estimate the log score / DPD scores use) instead of recomputing
+    it internally, so tests build it via the real estimator.
+    """
+    eps = 100 * torch.finfo(torch.float64).eps
+    f_bins, _ = unified_bin_density(probas, bin_widths, shared, eps)
+    return f_bins.gather(1, y_bin.unsqueeze(1)).squeeze(1)
 
 # Force CPU
 torch.cuda.is_available = lambda: False
@@ -189,10 +202,9 @@ def test_crls_basic(simple_shared_grid, simple_pmf_and_targets):
     y_bin = simple_pmf_and_targets["y_bin"]
     n_bins = simple_pmf_and_targets["n_bins"]
     
-    bw = bin_widths[None, :]  # broadcast-ready
     eps = torch.finfo(torch.float32).eps
     
-    crls = compute_crls(cdf, bin_widths, y_bin, n_bins, device, eps, bw, shared=True)
+    crls = compute_crls(cdf, bin_widths, y_bin, n_bins, device, eps, shared=True)
     
     assert isinstance(crls, float)
     assert crls >= 0  # CRLS should be non-negative
@@ -211,10 +223,9 @@ def test_crls_perfect_prediction(device=torch.device("cpu")):
     bin_widths = torch.ones(n_bins, dtype=torch.float32, device=device)
     y_bin = torch.tensor([1, 1], dtype=torch.int64, device=device)
     
-    bw = bin_widths[None, :]
     eps = torch.finfo(torch.float32).eps
     
-    crls = compute_crls(cdf, bin_widths, y_bin, n_bins, device, eps, bw, shared=True)
+    crls = compute_crls(cdf, bin_widths, y_bin, n_bins, device, eps, shared=True)
     
     # Perfect prediction should give low (but not zero due to discretization) CRLS
     assert crls >= 0
@@ -227,20 +238,20 @@ def test_crls_perfect_prediction(device=torch.device("cpu")):
 def test_cde_loss_basic(simple_shared_grid, simple_pmf_and_targets):
     """Test basic CDE loss computation."""
     device = simple_shared_grid["device"]
+    bin_edges = simple_shared_grid["bin_edges"]
     bin_widths = simple_shared_grid["bin_widths"]
     
     probas = simple_pmf_and_targets["probas"]
     y = simple_pmf_and_targets["y"]
     y_bin = simple_pmf_and_targets["y_bin"]
-    n_samples = simple_pmf_and_targets["n_samples"]
-    ns_idx = simple_pmf_and_targets["ns_idx"]
     
     bw = bin_widths[None, :]
+    g_y = _g_y(probas, bin_widths, y_bin, shared=True)
     
-    cde = compute_cde_loss(probas, bin_widths, y_bin, y, bw, shared=True, ns_idx=ns_idx)
+    cde = compute_cde_loss(probas, bin_widths, g_y, bw, shared=True)
     
     assert isinstance(cde, float)
-    assert cde >= 0  # CDE loss should be non-negative
+    assert math.isfinite(cde)  # CDE loss is a finite proper-scoring value
 
 
 def test_cde_loss_zero_prediction(device=torch.device("cpu")):
@@ -255,16 +266,15 @@ def test_cde_loss_zero_prediction(device=torch.device("cpu")):
     y = torch.tensor([0.5], dtype=torch.float32, device=device)
     y_bin = torch.tensor([0], dtype=torch.int64, device=device)
     
+    bin_edges = torch.tensor([0.0, 1.0, 2.0, 3.0], dtype=torch.float32, device=device)
     bin_widths = torch.ones(n_bins, dtype=torch.float32, device=device)
     bw = bin_widths[None, :]
-    ns_idx = torch.arange(n_samples, device=device)
+    g_y = _g_y(probas, bin_widths, y_bin, shared=True)
     
-    cde = compute_cde_loss(probas, bin_widths, y_bin, y, bw, shared=True, ns_idx=ns_idx)
+    cde = compute_cde_loss(probas, bin_widths, g_y, bw, shared=True)
     
-    # Zero probability at target should give high loss
-    # (should be finite due to clamping)
+    # Zero probability at target should give a finite score (clamped density).
     assert isinstance(cde, float)
-    assert cde >= 0
     assert not math.isinf(cde)
 
 

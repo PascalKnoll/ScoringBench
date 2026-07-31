@@ -84,7 +84,16 @@ def make_discretized_distributions_batch(x_grids, mus, sigmas, n_samples_list):
                 # Generate varied samples by varying mu slightly for each sample
                 # This creates different distributions per sample to test dispersion
                 # Use smaller variation to ensure stability across resolutions
-                rng = np.random.RandomState(hash((grid_name, label, n_samples)) % 2**31)
+                #
+                # The seed deliberately does NOT depend on ``grid_name``: a
+                # discretization test must hold the *underlying* distribution and
+                # the *targets* fixed and vary only the grid resolution.  Seeding
+                # per grid would redraw mus/sigmas (and hence the targets, which
+                # are ``dist.mean``) for every resolution, so the measured
+                # difference would mix discretization error with Monte-Carlo
+                # noise — the noise dominates for small ``n_samples`` and makes
+                # the test flaky rather than informative.
+                rng = np.random.RandomState(hash((label, n_samples)) % 2**31)
                 mus = rng.normal(base_mu, base_sigma * _MU_STD_FACTOR, size=n_samples)
                 sigmas = rng.uniform(base_sigma * _SIGMA_LOWER_FACTOR, base_sigma * _SIGMA_UPPER_FACTOR, size=n_samples)
                 
@@ -448,8 +457,14 @@ def _compute_metrics_at_grid(n_pts, n_samples=30):
     bin_widths_torch = torch.as_tensor(bin_widths, dtype=torch.float32, device=device)
     
     def _create_varied_dist(base_mu, base_sigma):
-        """Create a distribution with varied samples for meaningful dispersion."""
-        rng = np.random.RandomState(hash((n_pts, base_mu, base_sigma)) % 2**31)
+        """Create a distribution with varied samples for meaningful dispersion.
+
+        The seed deliberately excludes ``n_pts`` so that the same underlying
+        distributions and targets are discretized at every resolution; otherwise
+        the comparison would measure Monte-Carlo noise instead of discretization
+        error (see ``make_discretized_distributions_batch``).
+        """
+        rng = np.random.RandomState(hash((base_mu, base_sigma, n_samples)) % 2**31)
         mus = rng.normal(base_mu, base_sigma * _MU_STD_FACTOR, size=n_samples)
         sigmas = rng.uniform(base_sigma * _SIGMA_LOWER_FACTOR, base_sigma * _SIGMA_UPPER_FACTOR, size=n_samples)
         
@@ -558,4 +573,97 @@ def test_dpd_score_convergence_across_resolutions(beta):
             f"{key} convergence failures across resolutions {_GRID_SIZES}:\n"
             + "\n".join(f"  - {f}" for f in failures)
         )
+
+
+# ---------------------------------------------------------------------------
+# Monte-Carlo validation of the beta energy score
+#
+# The histogram energy score computed by ScoringBench must agree with the
+# *definition* of the beta energy score,
+#
+#     ES_beta(F, y) = E|X - y|^beta - 0.5 * E|X - X'|^beta,   X, X' ~ F i.i.d.,
+#
+# estimated independently by plain Monte-Carlo from samples of the SAME
+# predictive distribution.  We build the predictive distribution two ways from
+# one Gaussian F:
+#   * the eCDF equiprobable de-tied grid (samples_to_distribution), scored by
+#     compute_scoring_rules;
+#   * a large i.i.d. sample of F, scored by the naive MC formula above.
+# For a well-behaved (continuous) F the two must be close for every beta.
+# ---------------------------------------------------------------------------
+
+from scoringbench.wrappers.sample_based import samples_to_distribution
+
+
+def _mc_energy_score_beta(samples_row: np.ndarray, y: float, beta: float,
+                          n_pairs: int, rng) -> float:
+    """Independent Monte-Carlo estimate of ES_beta for one predictive dist."""
+    x = np.asarray(samples_row, dtype=np.float64)
+    # Term 1: E|X - y|^beta
+    term1 = np.mean(np.abs(x - y) ** beta)
+    # Term 2: 0.5 * E|X - X'|^beta  (independent pairs, no diagonal)
+    i = rng.integers(0, x.shape[0], size=n_pairs)
+    j = rng.integers(0, x.shape[0], size=n_pairs)
+    term2 = 0.5 * np.mean(np.abs(x[i] - x[j]) ** beta)
+    return term1 - term2
+
+
+@pytest.mark.parametrize("beta", [0.5, 1.0, 1.5, 1.9])
+def test_energy_score_matches_monte_carlo_beta_formula(beta):
+    """Histogram beta energy score ≈ independent Monte-Carlo estimate on a
+    continuous predictive distribution, for beta in (0, 2]."""
+    rng = np.random.default_rng(20240607)
+    n_test = 8
+    n_draws = 200_000          # large so the histogram is a faithful estimate of F
+    mu = rng.uniform(-1.0, 1.0, size=n_test)
+    sigma = rng.uniform(0.7, 1.4, size=n_test)
+
+    samples = rng.normal(loc=mu[:, None], scale=sigma[:, None], size=(n_test, n_draws))
+    # Targets a little away from the mean so both energy terms contribute.
+    y = mu + 0.5 * sigma
+
+    # ScoringBench path: eCDF equiprobable de-tied grid -> histogram energy score.
+    dist = samples_to_distribution(samples, n_bins=200)
+    sb = compute_scoring_rules(dist, y)
+    sb_es = sb[f"energy_score_beta_{beta}"]
+
+    # Independent Monte-Carlo path on the SAME draws.
+    mc_vals = np.array([
+        _mc_energy_score_beta(samples[i], float(y[i]), beta, n_pairs=400_000, rng=rng)
+        for i in range(n_test)
+    ])
+    mc_es = float(np.mean(np.clip(mc_vals, 0.0, None)))
+
+    rel = abs(sb_es - mc_es) / (abs(mc_es) + 1e-8)
+    assert np.isfinite(sb_es) and sb_es > 0.0
+    assert rel < 0.05, (
+        f"beta={beta}: histogram ES={sb_es:.6f} vs Monte-Carlo ES={mc_es:.6f} "
+        f"(rel_diff={rel:.4f})"
+    )
+
+
+def test_energy_score_crps_equals_beta_1_monte_carlo():
+    """At beta=1 the energy score is the CRPS; both must match the Monte-Carlo
+    CRPS of the predictive distribution."""
+    rng = np.random.default_rng(11)
+    n_test = 6
+    n_draws = 200_000
+    mu = rng.uniform(-1.0, 1.0, size=n_test)
+    sigma = rng.uniform(0.8, 1.2, size=n_test)
+    samples = rng.normal(loc=mu[:, None], scale=sigma[:, None], size=(n_test, n_draws))
+    y = mu - 0.3 * sigma
+
+    dist = samples_to_distribution(samples, n_bins=200)
+    scores = compute_scoring_rules(dist, y)
+
+    mc_vals = np.array([
+        _mc_energy_score_beta(samples[i], float(y[i]), 1.0, n_pairs=400_000, rng=rng)
+        for i in range(n_test)
+    ])
+    mc_crps = float(np.mean(np.clip(mc_vals, 0.0, None)))
+
+    # energy_score_beta_1.0 and crps are the same quantity here.
+    assert abs(scores["energy_score_beta_1.0"] - scores["crps"]) < 1e-3 * (abs(scores["crps"]) + 1e-8)
+    rel = abs(scores["crps"] - mc_crps) / (abs(mc_crps) + 1e-8)
+    assert rel < 0.05, f"CRPS {scores['crps']:.6f} vs MC {mc_crps:.6f} (rel={rel:.4f})"
 

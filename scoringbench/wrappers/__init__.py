@@ -11,10 +11,10 @@ live in their own sub-modules:
 """
 
 from .base import DistributionPrediction, ProbabilisticWrapper
+from .quantile_based import quantiles_to_distribution  # noqa: F401
 from .sample_based import (  # noqa: F401
     SampleBasedWrapper,
     grid_density_to_distribution,
-    quantiles_to_distribution,
     samples_to_distribution,
 )
 
@@ -38,6 +38,7 @@ _OPTIONAL = [
     ("CDEWrapper", "cde_wrapper"),
     ("FlexCodeWrapper", "flexcode_wrapper"),
     ("SurjectorsWrapper", "surjectors_wrapper"),
+    ("EXAONETabularWrapper", "exaonetabular_wrapper"),
 ]
 for _name, _mod in _OPTIONAL:
     try:
@@ -74,4 +75,5 @@ __all__ = [
     "CDEWrapper",
     "FlexCodeWrapper",
     "SurjectorsWrapper",
+    "EXAONETabularWrapper",
 ]

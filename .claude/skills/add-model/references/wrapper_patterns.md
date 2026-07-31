@@ -36,9 +36,10 @@ References: `xgb_vector.py` (per-bin probabilities), `cde_wrapper.py`,
 
 The model emits **per-observation quantiles**, either analytic (`ppf` of a
 parametric distribution) or predicted directly. Convert with
-`quantiles_to_distribution(...)` (in `sample_based.py`); it builds per-sample
-edges and a piecewise-uniform PMF. References: `ngboost_wrapper.py` (closed-form
-`ppf`), `catboost_wrapper.py`, `crepes_wrapper.py` (predicted quantiles).
+`quantiles_to_distribution(...)` (in `quantile_based.py`); it re-samples the CDF
+implied by the quantiles on a regular per-sample grid. References:
+`ngboost_wrapper.py` (closed-form `ppf`), `catboost_wrapper.py`,
+`crepes_wrapper.py` (predicted quantiles).
 
 ### 3. Sample-based wrapper — draws conditional samples of `y`
 
@@ -73,9 +74,10 @@ follow all of these:
    title/authors, code URL, license. Expose hyperparameters as constructor args
    with defaults stored as attributes. Do not auto-tune unless asked.
 
-Potentially use the shared converters (`quantiles_to_distribution`,
-`samples_to_distribution`, `grid_density_to_distribution`) over hand-building
-`DistributionPrediction`, so the on-disk representation matches every other model.
+Potentially use the shared converters (`quantiles_to_distribution` in
+`quantile_based.py`; `samples_to_distribution` and `grid_density_to_distribution`
+in `sample_based.py`) over hand-building `DistributionPrediction`, so the on-disk
+representation matches every other model.
 
 ---
 

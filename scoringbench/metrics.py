@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 # Energy score β values reported as additional metrics
 ENERGY_BETAS = [0.1, 0.3, 0.5, 0.7, 0.9, 1.0, 1.1, 1.3, 1.5, 1.7, 1.8, 1.9]
 DPD_BETAS = [0.0, 0.2, 0.5, 1.0]  # β values for Density Power Divergence scoring rule; 0.0 -> log-score (limit)
+DPD_BASED_KEYS = ("log_score", "cde_loss", *[f"dpd_beta_{b}" for b in DPD_BETAS])
 # Central coverage levels (%) reported via coverage_{level} / interval_score_{level};
 # the corresponding significance level is alpha = 1 - level/100.
 COVERAGE_LEVELS = [20, 40, 60, 80, 90, 95]
@@ -98,16 +99,28 @@ def compute_point_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
 
 @force_precision(torch.float64)
 def compute_dpd_scores(probas: torch.Tensor, bin_widths: torch.Tensor,
-                       p_at_y: torch.Tensor, dz_at_y: torch.Tensor, betas: list, shared: bool) -> dict:
+                       g_y: torch.Tensor, betas: list, shared: bool,
+                       density_integral=None) -> dict:
     """
     Density Power Divergence (DPD) scoring rule for histogram-based predictive densities.
 
     For a predictive density f and parameter β>0:
         S_β(f, y) = ∫ f(t)^{1+β} dt - (1 + 1/β) f(y)^β
 
-    Discretized on histogram grid {p_k, w_k} where density on bin k is g_k = p_k / w_k:
-        ∫ f^{1+β} dt ≈ ∑_k (p_k^{1+β} / w_k^{β})
-        f(y) ≈ p_y / w_y
+    Propriety of this rule is a statement about a *single* density f appearing in
+    both terms, so the integral and the point term must be two functionals of the
+    same f.  ``g_y`` supplies ``f(y)`` and ``density_integral`` supplies
+    ``∫ f^{power}``; the caller is responsible for taking both from one density
+    (see ``_density_terms``).
+
+    Parameters
+    ----------
+    density_integral : callable(power) -> (n_samples,) tensor, optional
+        Returns ``∫ f(t)^{power} dt`` per sample.  Defaults to the
+        piecewise-constant histogram density ``f_hist = p_k / w_k``, for which
+        the integral is available in closed form:
+        ``∫ f_hist^{1+β} = ∑_k p_k^{1+β} / w_k^{β}``.  The production path passes
+        the integral of ``unified_bin_density``, which is that same closed form.
 
     Returns mean DPD across samples for each β as keys `dpd_beta_{β}`.
     """
@@ -117,8 +130,13 @@ def compute_dpd_scores(probas: torch.Tensor, bin_widths: torch.Tensor,
 
     # Prevent division by zero
     eps = 100*torch.finfo(probas.dtype).eps
-    bw_safe = bw.clamp(min=eps)
-    g_y = (p_at_y / dz_at_y.clamp(min=eps)).clamp(min=eps)
+    g_y = g_y.clamp(min=eps)
+
+    if density_integral is None:
+        bw_safe = bw.clamp(min=eps)
+        def density_integral(power):
+            # ∫ f_hist^{power} dt = ∑_k p_k^{power} / w_k^{power-1}
+            return (probas.pow(power) / bw_safe.pow(power - 1.0)).sum(dim=-1)
 
     for beta in betas:
         if beta < 0:
@@ -128,9 +146,8 @@ def compute_dpd_scores(probas: torch.Tensor, bin_widths: torch.Tensor,
         if abs(beta) < 1e-12:
             loss = -torch.log(g_y)
         else:
-            # Integral term: ∑_k (p_k^{1+β} / w_k^{β})
-            denom = bw_safe.pow(beta)
-            integral = (probas.pow(1.0 + beta) / denom).sum(dim=-1)
+            # Integral term: ∫ f^{1+β}
+            integral = density_integral(1.0 + beta)
 
             # Point evaluation term: (1 + 1/β) * f(y)^β
             point_term = (1.0 + 1.0 / beta) * g_y.pow(beta)
@@ -183,15 +200,25 @@ def compute_energy_score_histogram_corrected(
             if not (0.0 < beta <= 2.0):
                 raise ValueError(f"Energy score beta must lie in (0, 2]; got beta={beta}.")
 
+        eps = 100 * torch.finfo(probas.dtype).eps
+        # A bin with (near-)zero width is a Dirac point mass at its midpoint,
+        # not a uniform slab.  Detect these once (β-independent) so we can use
+        # the correct point-mass distance instead of the degenerate integral.
+        zero_width = widths_ext <= eps
+
         for beta in betas:
             # ---- Term 1: E|X - y|^beta ----
-            # Exact integral for intra-bin uniform distribution.
-            # When a bin has zero width (degenerate bin), both the numerator and
-            # denominator are 0 (0/0 → NaN).  We clamp the denominator so that
-            # 0-width bins contribute 0 to Term 1, which is the correct limit.
+            # For a uniform bin this is the exact integral of |x - y|^beta.
+            # For a zero-width (point-mass) bin the integral is 0/0; the correct
+            # limit is the point-mass value |mid - y|^beta.
             numerator = u_r * u_r.abs().pow(beta) - u_l * u_l.abs().pow(beta)
-            eps = 100*torch.finfo(probas.dtype).eps
-            expected_d = numerator / (widths_ext.clamp(min=eps) * (beta + 1.0))
+            integral_d = numerator / (widths_ext.clamp(min=eps) * (beta + 1.0))
+            # Point-mass distance for zero-width bins: |mid - y|^beta.
+            if zero_width.any():
+                point_d = (mids_ext - y[:, None]).abs().pow(beta)
+                expected_d = torch.where(zero_width, point_d, integral_d)
+            else:
+                expected_d = integral_d
             term1 = (probas * expected_d).sum(dim=-1)
 
             # ---- Term 2: 0.5 * E|X - X'|^beta ----
@@ -206,24 +233,36 @@ def compute_energy_score_histogram_corrected(
                 
                 term2 = 0.5 * torch.einsum("si,ij,sj->s", probas, D, probas)
             else:
-                chunk_size = 256
-                term2_parts = []
+                # The per-sample pairwise term materialises a (chunk, n_bins,
+                # n_bins) tensor; with the fine grids some models emit (n_bins
+                # in the thousands) a fixed chunk of 256 rows overflows GPU
+                # memory. Size the chunk so that intermediate stays within a
+                # fixed element budget (>=1 row so progress is guaranteed).
+                elem_budget = 64_000_000  # ~0.5 GiB in float64 for the (chunk,n_bins,n_bins) tensor
+                chunk_size = max(1, min(256, elem_budget // max(1, n_bins * n_bins)))
+                # Write the result in place and lets each chunk's temporaries be freed
+                # before the next iteration allocates.
+                term2 = torch.empty(n_samples, dtype=probas.dtype, device=device)
                 for i in range(0, n_samples, chunk_size):
                     end = min(i + chunk_size, n_samples)
-                    p_c = probas[i:end]      
-                    m_c = bin_mids[i:end]    
-                    w_c = bin_widths[i:end]  
-                    
+                    p_c = probas[i:end]
+                    m_c = bin_mids[i:end]
+                    w_c = bin_widths[i:end]
+
+                    # (chunk, n_bins, n_bins) — the single largest allocation.
                     Dc = (m_c.unsqueeze(2) - m_c.unsqueeze(1)).abs()
                     if beta != 1.0:
                         Dc = Dc.pow(beta)
-                    
+
+                    # Overwrite the diagonal via a view (no index tensor alloc).
                     d_corr = (2.0 * w_c.pow(beta)) / ((beta + 1.0) * (beta + 2.0))
-                    idx = torch.arange(n_bins, device=device)
-                    Dc[:, idx, idx] = d_corr
-                    
-                    term2_parts.append(0.5 * torch.einsum("ci,cij,cj->c", p_c, Dc, p_c))
-                term2 = torch.cat(term2_parts)
+                    Dc.diagonal(dim1=1, dim2=2).copy_(d_corr)
+
+                    # einsum has no out=; copy the (chunk,) result into the
+                    # preallocated buffer, then free Dc before the next chunk.
+                    torch.mul(torch.einsum("ci,cij,cj->c", p_c, Dc, p_c),
+                              0.5, out=term2[i:end])
+                    del Dc
 
             # Average over samples (clamp per-sample: energy score / CRPS is
             # non-negative by definition; any sub-zero value is numerical error).
@@ -246,10 +285,13 @@ def compute_scoring_rules(dist: DistributionPrediction, y_true: np.ndarray) -> d
     # nearly-equal terms (variance E[X²] - E[X]², CRPS term1 - term2,
     # CDE ∫g² - 2g(y)); float32 cancellation there breaks guarantees such as
     # variance >= 0 / CRPS >= 0.
-    probas     = torch.as_tensor(dist.probas)
-    bin_edges  = torch.as_tensor(dist.bin_edges)
-    bin_mids   = torch.as_tensor(dist.bin_midpoints)
-    y          = torch.as_tensor(np.asarray(y_true, dtype=float))
+    # Build tensors on the compute device *first*, then let force_precision
+    # upcast in-place
+    _device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    probas     = torch.as_tensor(dist.probas,        device=_device)
+    bin_edges  = torch.as_tensor(dist.bin_edges,     device=_device)
+    bin_mids   = torch.as_tensor(dist.bin_midpoints, device=_device)
+    y          = torch.as_tensor(np.array(y_true, dtype=float), device=_device)  # np.array copies -> writable tensor
     shared     = bin_edges.ndim == 1
 
     logger.debug(
@@ -296,8 +338,10 @@ def _interval(alpha, cdf, bin_edges, y, n_samples, n_bins, device, shared, y_bin
     lower_q, upper_q = alpha / 2.0, 1.0 - alpha / 2.0
     if shared:
         n_e = len(bin_edges)
-        idx_l = (cdf >= lower_q).long().argmax(dim=1).clamp(max=n_e - 1)
-        idx_u = ((cdf >= upper_q).long().argmax(dim=1) + 1).clamp(max=n_e - 1)
+        # uint8 (1 byte/elem) is bit-identical to long (8 bytes/elem) for
+        # argmax on a 0/1 tensor; saves 8× on the (n_samples, n_bins) bool cast.
+        idx_l = (cdf >= lower_q).to(torch.uint8).argmax(dim=1).clamp(max=n_e - 1)
+        idx_u = ((cdf >= upper_q).to(torch.uint8).argmax(dim=1) + 1).clamp(max=n_e - 1)
         lows  = bin_edges[idx_l]
         highs = bin_edges[idx_u]
     else:
@@ -370,20 +414,43 @@ def compute_quantile_wcrps(cdf, bin_mids, y, n_samples, n_bins, device, shared):
 
 
 @force_precision(torch.float64)
-def compute_crls(cdf, bin_widths, y_bin, n_bins, device, eps, bw, shared):
+def compute_crls(cdf, bin_widths, y_bin, n_bins, device, eps, shared):
     """Compute Continuous Ranked Logarithmic Score (CRLS).
     
     CRLS = -sum_k w_k * [I(k>=target)*log(CDF_k) + I(k<target)*log(1-CDF_k)]
     
     This is bin-width-weighted cross-entropy between predicted CDF and the
     target step-function CDF (point mass at y). Formula from finetuned_regressor.py.
+
+    Notes
+    -----
+    **The ``eps`` clamp is an implicit regularizer, not just a numerical guard.**
+    The integration domain is *not* truncated -- every bin still contributes.
+    What ``cdf.clamp(eps, 1 - eps)`` does is *winsorize the integrand*: it caps
+    the per-bin penalty at ``-log(eps)``.  With the production
+    ``eps = 100 * finfo(float64).eps ~ 2.2e-14`` that ceiling is ~31.4 nats.
+    Three consequences follow, and they are properties of the reported metric:
+
+    1. **Saturation.**  A prediction that is confidently wrong beyond ``eps``
+       scores identically to one wrong at 1e-300, so CRLS has no resolving power
+       in precisely the regime an unclamped log score punishes most.
+    2. **Grid-extent dependence.**  The worst case is
+       ``sum_k w_k * (-log eps) = (z_max - z_min) * 31.4``, i.e. the penalty
+       ceiling grows with the total width of the support.  CRLS values are not
+       directly comparable across models whose bin grids span different ranges.
+
+    Separately (and independent of the clamp): ``cdf`` is a raw ``cumsum`` of the
+    PMF, so if ``sum_k p_k = 1 - delta`` every bin at or above the target absorbs
+    ``-log(1 - delta) ~ delta``, biasing CRLS upward by ``~delta *`` grid width.
+    Normalise ``probas`` upstream if that matters.
     
     Parameters
     ----------
     cdf : torch.Tensor
         Cumulative distribution function (n_samples, n_bins)
     bin_widths : torch.Tensor
-        Bin widths (n_bins,) or (n_samples, n_bins)
+        Bin widths, ``(n_bins,)`` if ``shared`` else ``(n_samples, n_bins)``.
+        Broadcast to ``(1, n_bins)`` internally when shared.
     y_bin : torch.Tensor
         Bin index of target value (n_samples,)
     n_bins : int
@@ -391,9 +458,8 @@ def compute_crls(cdf, bin_widths, y_bin, n_bins, device, eps, bw, shared):
     device : torch.device
         Computation device
     eps : float
-        Small epsilon for numerical stability
-    bw : torch.Tensor
-        Broadcast-ready bin widths
+        CDF clamp; also sets the per-bin penalty ceiling at ``-log(eps)``.
+        See Notes.
     shared : bool
         Whether grid is shared or per-sample
     
@@ -402,8 +468,9 @@ def compute_crls(cdf, bin_widths, y_bin, n_bins, device, eps, bw, shared):
     float
         Mean CRLS across samples
     """
+    bw          = bin_widths[None, :] if shared else bin_widths  # (1|n, n_bins)
     bin_idx    = torch.arange(n_bins, device=device)[None, :]  # (1, n_bins)
-    target_cdf = (bin_idx >= y_bin[:, None]).float()           # (n_samples, n_bins)
+    target_cdf = (bin_idx >= y_bin[:, None]).to(cdf.dtype)     # (n_samples, n_bins)
     cdf_c      = cdf.clamp(eps, 1 - eps)
     crls_bins  = target_cdf * (-torch.log(cdf_c)) + (1 - target_cdf) * (-torch.log1p(-cdf_c))
     crls       = (crls_bins * bw).sum(dim=-1).mean().item()
@@ -451,9 +518,10 @@ def compute_pit_ks(probas, cdf, bin_edges, bin_widths, y_bin, y, shared, ns_idx)
     frac = ((y - left_y) / w_y.clamp(min=eps)).clamp(0.0, 1.0)
     pit = (cdf_prev + p_y * frac).clamp(0.0, 1.0)
 
-    # y outside support -> clamp PIT to 0 / 1
-    pit = torch.where(y <= support_lo, torch.zeros_like(pit), pit)
-    pit = torch.where(y >= support_hi, torch.ones_like(pit), pit)
+    # y outside support -> clamp PIT to 0 / 1.
+    # Scalar constants avoid allocating zeros_like / ones_like tensors.
+    pit = torch.where(y <= support_lo, 0.0, pit)
+    pit = torch.where(y >= support_hi, 1.0, pit)
 
     pit_np = pit.detach().cpu().numpy().astype(np.float64)
     ks = stats.kstest(pit_np, "uniform")
@@ -464,7 +532,40 @@ def compute_pit_ks(probas, cdf, bin_edges, bin_widths, y_bin, y, shared, ns_idx)
 
 
 @force_precision(torch.float64)
-def compute_cde_loss(probas, bin_widths, y_bin, y, bw, shared, ns_idx):
+def unified_bin_density(probas, bin_widths, shared, eps):
+    """Piecewise-constant density on bin grid: f_k = p_k / w_k.
+    
+    Returns
+    -------
+    f_bins : (n_samples, n_bins) density value of each bin.
+    w_eff : (1, n_bins) or (n_samples, n_bins) width of each bin.
+    """
+    w_eff = bin_widths[None, :] if shared else bin_widths    # (1|n, n_bins)
+    f_bins = probas / w_eff.clamp(min=eps)
+
+    Z = (f_bins * w_eff).sum(dim=-1, keepdim=True)
+    return f_bins / Z.clamp(min=eps), w_eff
+
+
+def _density_terms(probas, cdf, bin_edges, bin_widths, bw, y, y_bin, shared, eps):
+    """Build (g_y, density_integral) pair from unified_bin_density.
+    
+    Returns
+    -------
+    g_y : (n_samples,) pointwise density f(y).
+    density_integral : callable(power) -> (n_samples,) integral of f^power.
+    """
+    f_bins, w_eff = unified_bin_density(probas, bin_widths, shared, eps)
+    g_y = f_bins.gather(1, y_bin.unsqueeze(1)).squeeze(1)
+
+    def density_integral(power):
+        return (f_bins.pow(power) * w_eff).sum(dim=-1)
+
+    return g_y, density_integral
+
+
+@force_precision(torch.float64)
+def compute_cde_loss(probas, bin_widths, g_y, bw, shared, density_integral=None):
     """Compute Continuous Density Estimation (CDE) Loss.
     
     From Izbicki and Lee (2016): "Nonparametric Conditional Density Estimation..."
@@ -482,43 +583,46 @@ def compute_cde_loss(probas, bin_widths, y_bin, y, bw, shared, ns_idx):
         ∫ f·g dz = g(y)                 (density of g evaluated at y)
     
     Discretized form (on grid with bin widths w_k and grid PMF p_k):
-        where g_density_k = p_k / w_k
-        ∫ g² dz  ≈  ∑_k (p_k/w_k)² · w_k = ∑_k p_k² / w_k
-        g(y)     ≈  p_ky / w_ky  (where y_bin = k_y finds bin containing y)
-    
-    Grid-stable form (converges as w_k → 0 uniformly):
-        L_CDE ≈ ∑_k p_k²/w_k − 2 p_ky/w_ky
-    
+        ∫ g² dz  ≈  ∑_k (p_k/w_k)² · w_k = ∑_k p_k² / w_k    (exact bin masses/widths)
+        g(y)     ≈  p_{k_y} / w_{k_y}                        (forward difference)
+
+    Relationship to DPD
+    -------------------
+    The CDE (integrated-squared-error / L²) loss is *identical* to the Density
+    Power Divergence score at β = 1:
+        S_{β=1}(g, y) = ∫ g(z)^{1+β} dz - (1 + 1/β) g(y)^β
+                      = ∫ g² dz - 2 g(y).
+    The production path therefore does not call this function at all — it reads
+    ``cde_loss`` straight off ``dpd_beta_1.0`` so the two cannot drift apart.
+    Kept as the standalone, directly readable form of the rule.
+
     Parameters
     ----------
     probas : torch.Tensor
         Probability masses per bin (n_samples, n_bins)
     bin_widths : torch.Tensor
         Bin widths (n_bins,) or (n_samples, n_bins)
-    y_bin : torch.Tensor
-        Bin index of target value (n_samples,)
-    y : torch.Tensor
-        Target values (n_samples,)
+    g_y : torch.Tensor
+        Pointwise predictive density at the target, f(y) (n_samples,).
     bw : torch.Tensor
         Broadcast-ready bin widths
     shared : bool
         Whether grid is shared or per-sample
-    ns_idx : torch.Tensor
-        Sample indices (used for non-shared path)
-    
+    density_integral : callable(power) -> (n_samples,) tensor, optional
+        ``∫ f(t)^{power} dt`` per sample; must come from the same density as
+        ``g_y``.  Defaults to the histogram density ``∑_k p_k² / w_k``.
+
     Returns
     -------
     float
         Mean CDE loss across samples
     """
     eps = 100*torch.finfo(probas.dtype).eps
-    term1 = (probas.pow(2) / bw.clamp(min=eps)).sum(dim=-1)  # ∫ g² dz
-    p_at_y = probas.gather(1, y_bin.unsqueeze(1)).squeeze(1)
-    if shared:
-        dz_at_y = bin_widths[y_bin]
+    if density_integral is None:
+        term1 = (probas.pow(2) / bw.clamp(min=eps)).sum(dim=-1)  # ∫ g² dz
     else:
-        dz_at_y = bin_widths.gather(1, y_bin.unsqueeze(1)).squeeze(1)
-    term2 = 2.0 * p_at_y / dz_at_y.clamp(min=eps)           # 2·g(y)
+        term1 = density_integral(2.0)                            # ∫ g² dz
+    term2 = 2.0 * g_y.clamp(min=eps)                         # 2·g(y)
     cde_loss = (term1 - term2).mean().item()
     return cde_loss
 
@@ -536,12 +640,10 @@ def _compute_scoring_rules_torch(probas, bin_edges, bin_mids, y, shared):
     Inputs are float64 tensors (upcast by ``@force_precision``); here we only
     move them onto the compute device.
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    probas    = probas.to(device)
-    bin_edges = bin_edges.to(device)
-    bin_mids  = bin_mids.to(device)
-    y         = y.to(device)
+    # Tensors are already on the target device (moved before the
+    # force_precision upcast in compute_scoring_rules); .to(device) is a
+    # no-op here but kept for safety when the function is called directly.
+    device = probas.device
 
     n_samples, n_bins = probas.shape
     ns_idx = torch.arange(n_samples, device=device)
@@ -568,22 +670,42 @@ def _compute_scoring_rules_torch(probas, bin_edges, bin_mids, y, shared):
     wcrps_right  = qwcrps_result["wcrps_right"]
     wcrps_center = qwcrps_result["wcrps_center"]
 
-    # ---- Log score ----
-    sel_p = probas[ns_idx, y_bin]
-    sel_w = bin_widths[y_bin] if shared else bin_widths[ns_idx, y_bin]
-    eps = 100*torch.finfo(probas.dtype).eps
-    density  = sel_p / sel_w.clamp(min=eps)
-    log_score = -torch.log(density.clamp(min=eps)).mean().item()
+    # ---- DPD scores, incl. log_score (β=0) and cde_loss (β=1) ----
+    # Reading all three off one call keeps them exactly consistent.  The density
+    # terms (``f_bins`` / ``g_y`` / the ``density_integral`` closure) are each a
+    # full (n_samples, n_bins) tensor; build and consume them inside this scope
+    # so they are freed on return instead of being pinned alive through the
+    # interval, energy-score and PIT sections below.
+    def _dpd_block():
+        # One piecewise-constant density on the bin grid supplies both terms, so
+        # the two-term rules (cde_loss, dpd_beta_*) are self-consistent and hence
+        # proper for it.  See ``unified_bin_density``.
+        g_y, density_integral = _density_terms(
+            probas, cdf, bin_edges, bin_widths, bw, y, y_bin, shared, eps
+        )
+        return compute_dpd_scores(probas, bin_widths, g_y,
+                                  betas=sorted({*DPD_BETAS, 0.0, 1.0}),
+                                  shared=shared,
+                                  density_integral=density_integral)
+
+    all_dpd = _dpd_block()
+    dpd_scores = {f"dpd_beta_{b}": all_dpd[f"dpd_beta_{b}"] for b in DPD_BETAS}
+    log_score = all_dpd["dpd_beta_0.0"]
+    cde_loss = all_dpd["dpd_beta_1.0"]
 
     # ---- Sharpness & Dispersion (Tran et al. 2020) ----
-    # Sharpness: mean of per-sample predictive std.
-    # Dispersion: std of per-sample predictive std.
-    mean_  = (probas * mids).sum(dim=-1)
-    var_   = ((probas * mids.pow(2)).sum(dim=-1) - mean_.pow(2)).clamp(min=0)
-    std_per_sample = var_.sqrt()                          # (n_samples,)
-    sharpness  = std_per_sample.mean().item()
-    # Use unbiased=False to avoid torch warning when n_samples is small
-    dispersion = std_per_sample.std(unbiased=False).item()
+    # Sharpness: mean of per-sample predictive std.  Dispersion: std of the
+    # per-sample predictive std.  Scoped so the (n_samples, n_bins) products
+    # ``probas * mids`` / ``probas * mids²`` are freed as soon as the two scalars
+    # are read out.
+    def _sharpness_dispersion():
+        mean_  = (probas * mids).sum(dim=-1)
+        var_   = ((probas * mids.pow(2)).sum(dim=-1) - mean_.pow(2)).clamp(min=0)
+        std_per_sample = var_.sqrt()                          # (n_samples,)
+        # Use unbiased=False to avoid torch warning when n_samples is small
+        return std_per_sample.mean().item(), std_per_sample.std(unbiased=False).item()
+
+    sharpness, dispersion = _sharpness_dispersion()
 
     # ---- Interval scores (shared path: vectorised; non-shared: searchsorted) ----
     # Coverage levels (%) from COVERAGE_LEVELS; significance alpha = 1 - level/100.
@@ -595,30 +717,23 @@ def _compute_scoring_rules_torch(probas, bin_edges, bin_mids, y, shared):
         interval_results[f"coverage_{cov_level}"] = cov_alpha
         interval_results[f"interval_score_{cov_level}"] = is_alpha
 
- 
-    energy_scores = []
-    for beta in ENERGY_BETAS:
-        energy_scores.append(compute_energy_score_histogram_corrected(probas, bin_mids, bin_widths, y, betas=[beta])[f"energy_score_beta_{beta}"])
+    # Every beta is computed independently inside
+    # ``compute_energy_score_histogram_corrected`` (its per-beta result does not
+    # depend on which other betas are requested), so a single batched call is
+    # bit-identical to the per-beta calls -- and CRPS is exactly the β=1.0 energy
+    # score, so we read it off here instead of paying for a second full pass over
+    # the (chunk, n_bins, n_bins) distance matrices.
+    energy_all = compute_energy_score_histogram_corrected(
+        probas, bin_mids, bin_widths, y, betas=ENERGY_BETAS
+    )
+    energy_scores = [energy_all[f"energy_score_beta_{beta}"] for beta in ENERGY_BETAS]
+    crps = energy_all["energy_score_beta_1.0"]
 
     # ---- CRLS ----
-    crls = compute_crls(cdf, bin_widths, y_bin, n_bins, device, eps, bw, shared)
-
-    crps = compute_energy_score_histogram_corrected(probas, bin_mids, bin_widths, y, betas=[1.0])[f"energy_score_beta_{1.0}"]
-
-    # ---- CDE Loss ----
-    cde_loss = compute_cde_loss(probas, bin_widths, y_bin, y, bw, shared, ns_idx)
+    crls = compute_crls(cdf, bin_widths, y_bin, n_bins, device, eps, shared)
 
     # ---- PIT KS test (Dawid 1984; Diebold et al. 1998) ----
     pit_ks = compute_pit_ks(probas, cdf, bin_edges, bin_widths, y_bin, y, shared, ns_idx)
-
-    # Compute p_at_y and dz_at_y for DPD scores
-    p_at_y = probas.gather(1, y_bin.unsqueeze(1)).squeeze(1)
-    if shared:
-        dz_at_y = bin_widths[y_bin]
-    else:
-        dz_at_y = bin_widths.gather(1, y_bin.unsqueeze(1)).squeeze(1)
-
-    dpd_scores = compute_dpd_scores(probas, bin_widths, p_at_y, dz_at_y, betas=DPD_BETAS, shared=shared)
 
     return {
         "crps":              crps,

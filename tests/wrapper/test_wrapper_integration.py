@@ -173,6 +173,12 @@ def _make_xgblss():
     return XGBLSSWrapper(n_quantiles=50, num_boost_round=100, distribution="Gaussian")
 
 
+def _make_ngboost():
+    pytest.importorskip("ngboost")
+    from scoringbench.wrappers.ngboost_wrapper import NGBoostWrapper
+    return NGBoostWrapper(n_estimators=300, learning_rate=0.03, n_quantiles=99)
+
+
 def _make_nori():
     pytest.importorskip("synthefy_nori")
     from scoringbench.wrappers.synthefy import SynthefyWrapper
@@ -217,6 +223,18 @@ def _make_surjectors(flow):
     return factory
 
 
+def _make_exaonetabular():
+    """EXAONE-Tabular regressor — downloads the released checkpoint on first use.
+
+    With only ``N_TRAIN`` support rows (far below ``nnls_min_validation_rows``)
+    the library falls back to uniform member weighting, so this exercises the
+    uniform-mean path of the wrapper's quantile combination.
+    """
+    pytest.importorskip("exaonetabular")
+    from scoringbench.wrappers.exaonetabular_wrapper import EXAONETabularWrapper
+    return EXAONETabularWrapper(device=_cuda_or_cpu())
+
+
 def _make_forest_diffusion():
     """ForestDiffusion (XGBoost-based flow) — small/fast settings for CI."""
     pytest.importorskip("ForestDiffusion")
@@ -247,9 +265,11 @@ MODEL_FACTORIES = [
     pytest.param(("CrepesWrapper",            _make_crepes),         id="CrepesWrapper"),
     pytest.param(("CrepesWrapper+Mondrian",   _make_crepes_mondrian), id="CrepesWrapper+Mondrian"),
     pytest.param(("XGBLSSWrapper",            _make_xgblss),       id="XGBLSSWrapper"),
+    pytest.param(("NGBoostWrapper",           _make_ngboost),      id="NGBoostWrapper"),
     pytest.param(("SynthefyWrapper",          _make_nori),         id="SynthefyWrapper"),
     pytest.param(("SynthefyWrapper[nori-30m]", _make_nori_30m),    id="SynthefyWrapper[nori-30m]"),
     pytest.param(("ForestDiffusionWrapper",   _make_forest_diffusion), id="ForestDiffusionWrapper"),
+    pytest.param(("EXAONETabularWrapper",     _make_exaonetabular),  id="EXAONETabularWrapper"),
 ]
 
 # CDE (freelunchtheorem) estimators — one registry entry per maintained preset.

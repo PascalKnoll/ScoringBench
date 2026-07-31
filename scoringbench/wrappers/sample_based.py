@@ -1,15 +1,4 @@
-"""Shared utilities for sample-/quantile-based ScoringBench wrappers.
-
-Two ingredients live here:
-
-``quantiles_to_distribution``
-    Convert a per-sample quantile matrix ``q`` (n_samples, K) evaluated at
-    probability levels ``alphas`` into a :class:`DistributionPrediction` with
-    per-sample bin edges and a piecewise-uniform PMF — exactly the
-    representation the rest of ScoringBench (CatBoost / XGB-quantile / Synthefy
-    wrappers) already produces.  Parametric models (e.g. NGBoost) feed it their
-    analytic ``ppf`` grid; sample-based models feed it empirical ``np.quantile``
-    estimates.
+"""Shared utilities for sample-based ScoringBench wrappers.
 
 ``SampleBasedWrapper``
     Base class for genuinely sample-based models (normalizing flows, BART, …).
@@ -27,104 +16,96 @@ import time
 
 import numpy as np
 
-from .base import DistributionPrediction, ProbabilisticWrapper
+from .base import (
+    DistributionPrediction,
+    ProbabilisticWrapper,
+    cdf_nodes_to_regular_grid,
+)
 
 
 # ---------------------------------------------------------------------------
-# Quantiles / samples -> DistributionPrediction
+# Samples -> DistributionPrediction
 # ---------------------------------------------------------------------------
 
-def quantiles_to_distribution(
-    q: np.ndarray,
-    alphas: np.ndarray,
-    mean: np.ndarray | None = None,
-    y_range: tuple[float, float] | None = None,
-) -> DistributionPrediction:
-    """Build a piecewise-uniform ``DistributionPrediction`` from quantiles.
+def _ecdf_to_regular_grid(row: np.ndarray, n_bins: int):
+    """Bin one row of draws onto a regular grid; return ``(edges, masses)``.
 
-    Parameters
-    ----------
-    q : (n_samples, K) array
-        Per-sample quantile values at the probability levels ``alphas``.
-    alphas : (K,) array
-        Strictly increasing probability levels in (0, 1).
-    mean : (n_samples,) array, optional
-        Point prediction to report. If ``None`` the PMF mean is used.
-    y_range : (lo, hi), optional
-        Fallback finite range used to sanitize non-finite quantiles.
+    Nodes are the unique sorted draws with mid-rank (Hazen) CDF values
+    ``(cum - c/2) / n`` -- strictly increasing in ``(0, 1)``, so the resampled CDF
+    is monotone.  Equal *width* (not equal probability) means a repeated draw's
+    mass lands wholly in one bin instead of collapsing the grid; bins may be
+    empty but keep a strictly positive width.  A single distinct value is a point
+    mass; the support guard invents the only width a histogram can give it.
     """
-    q = np.asarray(q, dtype=np.float64)
-    if q.ndim == 1:
-        q = q[np.newaxis, :]
-    alphas = np.asarray(alphas, dtype=np.float64).reshape(-1)
+    u, counts = np.unique(row, return_counts=True)          # u strictly increasing
 
-    lo, hi = (float(y_range[0]), float(y_range[1])) if y_range is not None else (0.0, 1.0)
-    if not np.all(np.isfinite(q)):
-        q = np.nan_to_num(q, nan=lo, posinf=hi, neginf=lo)
+    if u.shape[0] == 1:
+        u = np.repeat(u, 2)                                 # tied pair; the support
+        counts = np.array([1, 1])                           # guard supplies the width
 
-    # Enforce monotonic quantiles per sample.
-    q = np.sort(q, axis=1)
-    n_samples = q.shape[0]
-
-    # Per-sample bin edges: extend slightly beyond the outermost quantiles so
-    # the full probability mass [0, 1] is covered.
-    left_w = np.maximum(q[:, 1] - q[:, 0], 1e-7)
-    right_w = np.maximum(q[:, -1] - q[:, -2], 1e-7)
-    bin_edges = np.concatenate(
-        [(q[:, 0] - left_w)[:, None], q, (q[:, -1] + right_w)[:, None]],
-        axis=1,
-    )
-
-    # Mass per bin: alpha_0, diff(alphas), 1 - alpha_last.
-    masses = np.concatenate([[alphas[0]], np.diff(alphas), [1.0 - alphas[-1]]])
-    probas = np.broadcast_to(masses[None, :], (n_samples, len(masses))).copy()
-
-    bin_midpoints = (bin_edges[:, :-1] + bin_edges[:, 1:]) / 2
-    pmf_mean = np.sum(probas * bin_midpoints, axis=-1)
-    out_mean = pmf_mean if mean is None else np.asarray(mean, dtype=np.float64).reshape(-1)
-
-    return DistributionPrediction(
-        probas=probas,
-        bin_edges=bin_edges,
-        bin_midpoints=bin_midpoints,
-        mean=out_mean,
-    )
+    n = counts.sum()
+    p_nodes = (np.cumsum(counts) - 0.5 * counts) / n        # mid-rank, strictly increasing
+    edges, masses = cdf_nodes_to_regular_grid(u, p_nodes, n_bins)
+    return edges[0], masses[0]
 
 
 def samples_to_distribution(
     samples: np.ndarray,
-    n_quantiles: int = 99,
+    n_bins: int = 100,
     y_range: tuple[float, float] | None = None,
 ) -> DistributionPrediction:
     """Derive a ``DistributionPrediction`` from conditional draws.
+
+    Each row's empirical CDF is resampled onto ``n_bins`` equally *wide* bins (see
+    :func:`_ecdf_to_regular_grid`), so every width is ``span / n_bins > 0`` and the
+    draws' shape is carried by the masses.  Bins may be empty but keep a strictly
+    positive width, so the piecewise-constant density stays well defined.
 
     Parameters
     ----------
     samples : (n_test, n_draws) array
         Conditional samples of the target, one row per test instance.
-    n_quantiles : int
-        Number of equally-spaced probability levels used to summarize the
-        empirical distribution of each row.
+    n_bins : int
+        Number of equally wide bins per sample (default 100).
+    y_range : tuple[float, float], optional
+        Fallback range for sanitizing non-finite samples.
     """
+    n_bins = max(int(n_bins), 1)
+
     samples = np.asarray(samples, dtype=np.float64)
     if samples.ndim == 1:
         samples = samples[:, None]
 
-    # Replace any non-finite draws with the per-row median (or 0 if a whole row
-    # is non-finite) so quantile estimation stays well defined.
+    # Replace any non-finite draws with the per-row median; if a whole row is
+    # non-finite fall back to the y_range midpoint (or 0 when y_range is None)
+    # so estimation stays well defined.
     if not np.all(np.isfinite(samples)):
         finite = np.isfinite(samples)
+        fallback = 0.0 if y_range is None else 0.5 * (float(y_range[0]) + float(y_range[1]))
         row_median = np.array([
-            np.median(samples[i, finite[i]]) if finite[i].any() else 0.0
+            np.median(samples[i, finite[i]]) if finite[i].any() else fallback
             for i in range(samples.shape[0])
         ])
         samples = np.where(finite, samples, row_median[:, None])
 
-    alphas = np.array([k / (n_quantiles + 1) for k in range(1, n_quantiles + 1)])
-    # np.quantile over the draw axis -> (K, n_test) -> transpose to (n_test, K).
-    q = np.quantile(samples, alphas, axis=1).T
+    n_test = samples.shape[0]
+
+    # Per-row regular grid and masses from the interpolated eCDF.
+    bin_edges = np.empty((n_test, n_bins + 1), dtype=np.float64)
+    probas = np.empty((n_test, n_bins), dtype=np.float64)
+    for i in range(n_test):
+        bin_edges[i], probas[i] = _ecdf_to_regular_grid(samples[i], n_bins)
+
+    bin_midpoints = (bin_edges[:, :-1] + bin_edges[:, 1:]) / 2.0
+
     mean = samples.mean(axis=1)
-    return quantiles_to_distribution(q, alphas, mean=mean, y_range=y_range)
+    return DistributionPrediction(
+        probas=probas,
+        bin_edges=bin_edges,
+        bin_midpoints=bin_midpoints,
+        mean=mean,
+        is_sample_based=True,
+    )
 
 
 def grid_density_to_distribution(
@@ -197,14 +178,16 @@ class SampleBasedWrapper(ProbabilisticWrapper):
     MAX_SAMPLE_SECONDS : float
         Hard wall-clock cap on sampling (default 120 s). Once exceeded, the PMF
         is built from whatever draws were collected so far.
-    N_QUANTILES : int
-        Resolution of the PMF derived from the draws.
+    N_BINS : int
+        Number of equally *wide* bins in the PMF derived from the draws via
+        :func:`samples_to_distribution`. Widths are uniform; the draws' shape is
+        carried by the per-bin masses.
     """
 
     N_SAMPLES: int = 300
     SAMPLE_CHUNK: int = 100
     MAX_SAMPLE_SECONDS: float = 120.0
-    N_QUANTILES: int = 99
+    N_BINS: int = 100
 
     def _draw_samples(self, X, n_samples: int) -> np.ndarray:
         """Return an ``(n_test, n_samples)`` array of conditional target draws."""
@@ -231,7 +214,7 @@ class SampleBasedWrapper(ProbabilisticWrapper):
 
     def predict_distribution(self, X) -> DistributionPrediction:
         samples = self._collect_samples(X)
-        return samples_to_distribution(samples, n_quantiles=self.N_QUANTILES)
+        return samples_to_distribution(samples, n_bins=self.N_BINS)
 
     def predict(self, X) -> np.ndarray:
         return self._collect_samples(X).mean(axis=1)

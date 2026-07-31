@@ -35,7 +35,12 @@ from scoringbench.metrics import (
     compute_quantile_wcrps,
     compute_scoring_rules,
     force_precision,
+    unified_bin_density,
 )
+
+# ``numpy.trapz`` was removed in NumPy 2.0 in favour of ``numpy.trapezoid``;
+# fall back for older NumPy that only has ``trapz``.
+_trapz = getattr(np, "trapezoid", None) or np.trapz
 from scoringbench.wrappers import DistributionPrediction
 
 
@@ -150,7 +155,7 @@ def _crps_by_definition(probas_row, edges, y, n_grid=2_000_001):
     t = np.linspace(edges[0] - 1.0, edges[-1] + 1.0, n_grid)
     Ft = np.interp(t, edges, cdf_at_edges)            # 0 below support, 1 above
     step = (t >= y).astype(np.float64)
-    return float(np.trapz((Ft - step) ** 2, t))
+    return float(_trapz((Ft - step) ** 2, t))
 
 
 def test_crps_float64_matches_independent_definition():
@@ -303,9 +308,12 @@ def _make_inputs(dtype, scale=1.0e7, span=200.0, K=400, n=8, seed=0):
     p_at_y = probas.gather(1, y_bin.unsqueeze(1)).squeeze(1)
     dz_at_y = bin_widths[y_bin]
     eps = 100 * torch.finfo(dtype).eps
+    # Shared bin density f(y) used by log score / DPD / CDE.
+    f_bins, _ = unified_bin_density(probas, bin_widths, True, eps)
+    g_y = f_bins.gather(1, y_bin.unsqueeze(1)).squeeze(1)
     return dict(
         probas=probas, bin_edges=bin_edges, bin_mids=bin_mids, bin_widths=bin_widths,
-        y=y, cdf=cdf, bw=bw, y_bin=y_bin, p_at_y=p_at_y, dz_at_y=dz_at_y,
+        y=y, cdf=cdf, bw=bw, y_bin=y_bin, p_at_y=p_at_y, dz_at_y=dz_at_y, g_y=g_y,
         ns_idx=ns_idx, eps=eps, n_samples=n_samples, n_bins=n_bins, device=device,
     )
 
@@ -317,7 +325,7 @@ def _m_energy_crps(I):
 
 def _m_dpd(I):
     return compute_dpd_scores.__wrapped__(
-        I["probas"], I["bin_widths"], I["p_at_y"], I["dz_at_y"], betas=[0.5, 1.0], shared=True)
+        I["probas"], I["bin_widths"], I["g_y"], betas=[0.5, 1.0], shared=True)
 
 
 def _m_wcrps(I):
@@ -327,12 +335,12 @@ def _m_wcrps(I):
 
 def _m_crls(I):
     return {"crls": compute_crls.__wrapped__(
-        I["cdf"], I["bin_widths"], I["y_bin"], I["n_bins"], I["device"], I["eps"], I["bw"], True)}
+        I["cdf"], I["bin_widths"], I["y_bin"], I["n_bins"], I["device"], I["eps"], True)}
 
 
 def _m_cde_loss(I):
     return {"cde_loss": compute_cde_loss.__wrapped__(
-        I["probas"], I["bin_widths"], I["y_bin"], I["y"], I["bw"], True, I["ns_idx"])}
+        I["probas"], I["bin_widths"], I["g_y"], I["bw"], True)}
 
 
 def _m_pit_ks(I):

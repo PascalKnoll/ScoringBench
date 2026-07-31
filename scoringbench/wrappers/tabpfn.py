@@ -7,15 +7,6 @@ import numpy as np
 from .base import DistributionPrediction, ProbabilisticWrapper
 
 
-import sys
-from pathlib import Path
-
-# Prefer local checkout of the repository when present in the workspace.
-repo_root = Path(__file__).resolve().parents[2]
-if repo_root.exists():
-    sys.path.insert(0, str(repo_root))  # prefer local modified packages
-
-
 class TabPFNWrapper(ProbabilisticWrapper):
     """Wraps TabPFNRegressor with a DistributionPrediction interface.
 
@@ -25,6 +16,14 @@ class TabPFNWrapper(ProbabilisticWrapper):
 
     def __init__(self, device=None, **kwargs):
         import torch
+        import sys
+        
+        # Ensure we use the pip-installed tabpfn by clearing any loaded tabpfn modules
+        for k in list(sys.modules.keys()):
+            if k.startswith('tabpfn'):
+                sys.modules.pop(k)
+        
+        # Import from pip-installed tabpfn package
         from tabpfn import TabPFNRegressor
         kwargs.pop('device', None)
         if device is None:
@@ -57,11 +56,16 @@ class TabPFNWrapper(ProbabilisticWrapper):
         probas = torch.softmax(logits, dim=-1).cpu().numpy()    # (n_samples, n_bins)
         mean = (probas * bin_midpoints[None, :]).sum(axis=-1)   # (n_samples,)
 
+        # The criterion's borders already *are* a histogram grid with positive
+        # widths -- TabPFN predicts mass on a fixed bar chart rather than
+        # quantiles -- so there is nothing to repair and resampling could only
+        # blur it.  Pass the model's own grid and PMF through untouched.
         return DistributionPrediction(
             probas=probas,
             bin_edges=bin_edges,
             bin_midpoints=bin_midpoints,
             mean=mean,
+            is_natively_gridded_model=True,
         )
 
 
@@ -169,12 +173,50 @@ class FinetuneTabPFNWrapper(ProbabilisticWrapper):
         mse_loss_clip: float | None = None,
         mae_loss_weight: float = 0.0,
         mae_loss_clip: float | None = None,
-        early_stopping_metric: str | None = None,  # None defaults to "same_as_beta"
         beta: str | float | None = None,
         **kwargs
     ):
         import torch
-        from tabpfn.finetuning.finetuned_regressor import FinetunedTabPFNRegressor
+        import sys
+        from pathlib import Path
+        
+        # Import from local additional_models/tabpfn
+        repo_root = Path(__file__).resolve().parents[2]
+        local_additional_models = repo_root / "additional_models"
+        
+        if not local_additional_models.exists():
+            raise ImportError(
+                f"Local additional_models directory not found at {local_additional_models}. "
+                "FinetuneTabPFNWrapper requires the local tabpfn package."
+            )
+        
+        # We need to ensure all tabpfn.* modules come from the local version
+        # Save the current sys.path and modules state
+        original_path = sys.path.copy()
+        modules_to_remove = [k for k in sys.modules.keys() if k.startswith('tabpfn')]
+        saved_modules = {k: sys.modules.pop(k) for k in modules_to_remove}
+        
+        try:
+            # Prepend local path so it takes precedence
+            sys.path.insert(0, str(local_additional_models))
+            
+            # Now import from the local version
+            from tabpfn.finetuning.finetuned_regressor import FinetunedTabPFNRegressor
+            
+            # Keep the local tabpfn modules loaded for this class to work
+            # but restore the pip-installed version for other uses
+        except Exception as exc:
+            # Restore original modules on error
+            sys.modules.update(saved_modules)
+            raise ImportError(
+                "FinetunedTabPFNRegressor not found from local additional_models/tabpfn. "
+                "Ensure additional_models/tabpfn/finetuning/finetuned_regressor.py exists "
+                "and dependencies are installed."
+            ) from exc
+        finally:
+            # Restore original sys.path
+            sys.path[:] = original_path
+        
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self._device = device
@@ -208,7 +250,6 @@ class FinetuneTabPFNWrapper(ProbabilisticWrapper):
             mse_loss_clip=mse_loss_clip,
             mae_loss_weight=mae_loss_weight,
             mae_loss_clip=mae_loss_clip,
-            early_stopping_metric=early_stopping_metric,
             beta=beta,
             **kwargs
         )
@@ -237,9 +278,12 @@ class FinetuneTabPFNWrapper(ProbabilisticWrapper):
         probas = torch.softmax(logits, dim=-1).cpu().numpy()    # (n_samples, n_bins)
         mean = (probas * bin_midpoints[None, :]).sum(axis=-1)   # (n_samples,)
 
+        # Native histogram grid (see TabPFNWrapper.predict_distribution): skip the
+        # regridding so the criterion's borders reach the metrics untouched.
         return DistributionPrediction(
             probas=probas,
             bin_edges=bin_edges,
             bin_midpoints=bin_midpoints,
             mean=mean,
+            is_natively_gridded_model=True,
         )

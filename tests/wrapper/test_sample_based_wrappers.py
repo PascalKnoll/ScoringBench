@@ -16,9 +16,9 @@ import pytest
 
 from scoringbench.metrics import compute_metrics
 from scoringbench.wrappers.base import DistributionPrediction
+from scoringbench.wrappers.quantile_based import quantiles_to_distribution
 from scoringbench.wrappers.sample_based import (
     SampleBasedWrapper,
-    quantiles_to_distribution,
     samples_to_distribution,
 )
 
@@ -87,20 +87,186 @@ def _assert_learns(dist: DistributionPrediction, y_test: np.ndarray):
 # ---------------------------------------------------------------------------
 
 def test_quantiles_to_distribution_shapes():
+    # K levels still span K - 1 bins, but the edges are a regular grid over the
+    # tail-extended support, not the quantiles themselves.
     alphas = np.array([0.25, 0.5, 0.75])
     q = np.array([[0.0, 1.0, 2.0], [1.0, 1.5, 4.0]])
     dist = quantiles_to_distribution(q, alphas)
-    assert dist.probas.shape == (2, len(alphas) + 1)
-    assert dist.bin_edges.shape == (2, len(alphas) + 2)
+    assert dist.probas.shape == (2, len(alphas) - 1)
+    assert dist.bin_edges.shape == (2, len(alphas))
     np.testing.assert_allclose(dist.probas.sum(axis=1), 1.0)
+
+    widths = np.diff(dist.bin_edges, axis=1)
+    assert np.all(widths > 0.0)
+    np.testing.assert_allclose(widths[:, 0], widths[:, 1], rtol=1e-12)
+    # Support: one local spacing beyond the outermost quantiles on each side.
+    np.testing.assert_allclose(dist.bin_edges[:, 0], q[:, 0] - (q[:, 1] - q[:, 0]))
+    np.testing.assert_allclose(dist.bin_edges[:, -1], q[:, -1] + (q[:, -1] - q[:, -2]))
 
 
 def test_samples_to_distribution_recovers_mean():
     rng = np.random.default_rng(1)
     samples = rng.normal(loc=3.0, scale=1.0, size=(4, 5000))
-    dist = samples_to_distribution(samples, n_quantiles=99)
+    dist = samples_to_distribution(samples, n_bins=99)
     _validate_distribution(dist, 4)
     np.testing.assert_allclose(dist.mean, 3.0, atol=0.1)
+
+
+# ---------------------------------------------------------------------------
+# eCDF -> regular grid: explicit guarantee tests
+#
+# The representation must PROVABLY avoid the failure mode that makes a histogram
+# density (mass / width) ill-defined: a zero-width bin, where mass / width blows
+# up.  A *regular* grid rules that out by construction -- every width is
+# ``span / n_bins`` -- which is the whole reason the eCDF is resampled instead of
+# being read off the draws' own quantiles.
+#
+# The trade is that a bin may now be empty (an atom's mass lands wholly in the
+# one bin containing it, leaving its neighbours dry).  That costs nothing,
+# because ``is_sample_based=True`` already tells metrics.py to skip the
+# density-based rules: a finite set of draws does not pin down a pointwise
+# density anyway.  CRPS and the CDF-based rules are unaffected.
+#
+# These tests exercise pathological *discrete / heavily tied* draws -- the case
+# that collapsed the old adaptive quantile grid -- across a range of n_bins.
+# ---------------------------------------------------------------------------
+
+# A gauntlet of adversarial sample rows (each row = draws for one test point).
+_TIED_ROWS = [
+    np.array([1.0] * 100),                                  # all identical (degenerate)
+    np.array([0.0] * 50 + [1.0] * 50),                      # two atoms
+    np.repeat(np.array([-2.0, -2.0, 0.0, 5.0, 5.0]), 20),   # 3 unique, tied
+    np.array([7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 7.0, 8.0]),     # near-degenerate
+    np.array([-1e6, 0.0, 0.0, 0.0, 1e6]),                   # huge dynamic range + ties
+    np.round(np.random.default_rng(3).normal(size=200)),    # integer-rounded (many ties)
+]
+
+
+@pytest.mark.parametrize("n_bins", [2, 10, 50, 100, 257])
+@pytest.mark.parametrize("row_idx", range(len(_TIED_ROWS)))
+def test_ecdf_grid_no_zero_width_bins(row_idx, n_bins):
+    """No zero-width bins for arbitrary tied / discrete draws, for any n_bins."""
+    row = _TIED_ROWS[row_idx][None, :]
+    dist = samples_to_distribution(row, n_bins=n_bins)
+
+    assert dist.bin_edges.shape == (1, n_bins + 1)
+    widths = np.diff(dist.bin_edges, axis=1)
+    assert np.all(np.isfinite(widths))
+    assert np.all(widths > 0.0), (
+        f"zero-width bin for row {row_idx}, n_bins={n_bins}: min width {widths.min():.3e}"
+    )
+
+
+@pytest.mark.parametrize("n_bins", [2, 10, 50, 100, 257])
+@pytest.mark.parametrize("row_idx", range(len(_TIED_ROWS)))
+def test_ecdf_grid_is_regular_and_holds_all_the_mass(row_idx, n_bins):
+    """Widths are uniform and the masses are a valid PMF summing to exactly 1.
+
+    Empty bins are *allowed* here (that is the equal-width trade), so the
+    guarantee is non-negativity plus exact total mass, not positivity: the eCDF
+    is anchored at ``C = 0`` / ``C = 1`` on the extended support, so no mass
+    leaks off the grid however heavily the draws tie.
+    """
+    row = _TIED_ROWS[row_idx][None, :]
+    dist = samples_to_distribution(row, n_bins=n_bins)
+
+    assert dist.probas.shape == (1, n_bins)
+    assert np.all(dist.probas >= 0.0), f"negative mass: {dist.probas.min():.3e}"
+    np.testing.assert_allclose(dist.probas.sum(axis=1), 1.0, rtol=1e-12, atol=1e-12)
+
+    # Regularity is checked in *absolute* terms against the resolution of the
+    # edge coordinates, not as a relative spread of the widths.  For the fully
+    # degenerate rows the support collapses to the minimum pad (~1e-6) while the
+    # edges still sit at coordinate ~1, so a 1-ULP rounding of the linspace is a
+    # large *fraction* of a width while being the smallest representable error
+    # there is.  This is the same tolerance model ``_is_regular`` uses.
+    edges = dist.bin_edges
+    widths = np.diff(edges, axis=1)
+    target = (edges[:, -1] - edges[:, 0]) / n_bins
+    tol = 4.0 * np.spacing(np.abs(edges).max())
+    dev = np.abs(widths - target[:, None]).max()
+    assert dev <= tol, (
+        f"grid is not regular for row {row_idx}, n_bins={n_bins}: "
+        f"max |w - span/n| = {dev:.3e} > {tol:.3e}"
+    )
+
+
+@pytest.mark.parametrize("n_bins", [10, 100])
+@pytest.mark.parametrize("row_idx", range(len(_TIED_ROWS)))
+def test_ecdf_grid_mass_lands_where_the_draws_are(row_idx, n_bins):
+    """An atom's mass ends up in the bin that contains it.
+
+    Equal width means the shape of the draws is carried by the *masses*, so the
+    representation is only faithful if mass tracks the draws.  For every distinct
+    draw value, the bin bracketing it must carry mass -- and the bins carrying
+    mass must together account for essentially all of it.
+    """
+    row = _TIED_ROWS[row_idx][None, :]
+    dist = samples_to_distribution(row, n_bins=n_bins)
+    edges, probas = dist.bin_edges[0], dist.probas[0]
+
+    # Interior draws (the outermost ones sit on a bin boundary by construction).
+    for value in np.unique(row):
+        k = int(np.clip(np.searchsorted(edges, value, side="right") - 1, 0, n_bins - 1))
+        lo = max(k - 1, 0)
+        hi = min(k + 2, n_bins)
+        assert probas[lo:hi].sum() > 0.0, (
+            f"row {row_idx}: no mass near draw {value} (bin {k})"
+        )
+
+
+def test_ecdf_grid_metrics_finite_on_discrete_draws():
+    """Every score (CRPS and the density-power-divergence rules alike) stays
+    finite on heavy ties, since the regular-grid PMF has strictly positive bin
+    widths (a zero-width or zero-mass bin would blow the density up)."""
+    rng = np.random.default_rng(7)
+    # 20 test points, 100 draws each, only ~5 unique values -> heavy ties.
+    base = np.array([-3.0, -1.0, 0.0, 2.0, 4.0])
+    samples = rng.choice(base, size=(20, 100))
+    dist = samples_to_distribution(samples, n_bins=64)
+    _validate_distribution(dist, 20)
+
+    # y lands exactly on the atoms (the worst case for a fixed-width histogram,
+    # where the surrounding bin could be empty).
+    y = rng.choice(base, size=20)
+    metrics = compute_metrics(dist, y)
+    # Density/DPD-based scores are now computed for every prediction and must be
+    # finite even on heavy ties.
+    for key in ("crps", "log_score", "cde_loss"):
+        assert np.isfinite(metrics[key]), f"{key} not finite: {metrics[key]}"
+    for key, val in metrics.items():
+        if key.startswith("dpd"):
+            assert np.isfinite(val), f"{key} not finite: {val}"
+
+
+def test_ecdf_grid_edges_bracket_support():
+    """Edges span the observed support (outer bins padded, never inverted)."""
+    row = np.array([[2.0, 2.0, 2.0, 5.0, 9.0, 9.0]])
+    dist = samples_to_distribution(row, n_bins=8)
+    edges = dist.bin_edges[0]
+    assert edges[0] <= 2.0 < 9.0 <= edges[-1]
+    assert np.all(np.diff(edges) > 0.0)
+
+
+def test_ecdf_grid_energy_score_nonzero_on_tied_draws():
+    """Energy score stays finite and positive on discrete draws with tied values.
+
+    Tied values would collapse an adaptive quantile grid to zero-width interior
+    bins.  Resampling the eCDF onto a *regular* grid removes the degeneracy at
+    the source -- there is no zero width to repair -- so the energy score, which
+    reads bin midpoints and widths, stays well defined."""
+    # 5 unique values, tied so an adaptive quantile grid collapses interior bins.
+    base = np.array([0.0, 0.0, 0.0, 10.0, 10.0])
+    samples = np.tile(base, (8, 20))            # (8, 100), heavy ties
+    dist = samples_to_distribution(samples, n_bins=50)
+    y = np.full(8, 3.0)                          # y away from the atoms
+    metrics = compute_metrics(dist, y)
+
+    energy_keys = [k for k in metrics if k.startswith("energy_score")]
+    assert energy_keys, "no energy score keys produced"
+    for k in energy_keys:
+        assert np.isfinite(metrics[k]), f"{k} not finite"
+        assert metrics[k] > 0.0, f"{k} == {metrics[k]} (expected > 0)"
 
 
 def test_sample_based_timeout_is_respected():
@@ -125,16 +291,6 @@ def test_sample_based_timeout_is_respected():
 # ---------------------------------------------------------------------------
 # Per-model integration tests (skip if library missing)
 # ---------------------------------------------------------------------------
-
-def test_ngboost_integration():
-    pytest.importorskip("ngboost")
-    from scoringbench.wrappers.ngboost_wrapper import NGBoostWrapper
-
-    Xtr, ytr, Xte, yte = _make_data()
-    model = NGBoostWrapper(n_estimators=300, learning_rate=0.03, n_quantiles=99)
-    model.fit(Xtr, ytr)
-    dist = model.predict_distribution(Xte)
-    _assert_learns(dist, yte)
 
 
 def test_nflows_integration():

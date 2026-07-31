@@ -16,7 +16,7 @@ torch.cuda.is_available = lambda: False
 from scoringbench.metrics import (
     compute_scoring_rules,
     DPD_BETAS,
-)
+)  # noqa: E402
 from scoringbench.wrappers import DistributionPrediction
 
 
@@ -24,29 +24,65 @@ from scoringbench.wrappers import DistributionPrediction
 # Numerical Reference Implementations
 # ============================================================================
 
-def reference_dpd_score(probas, bin_widths, p_at_y, dz_at_y, beta):
-    """Reference DPD computation on a histogram grid.
+def _reference_unified_density(probas, bin_edges):
+    """Independent NumPy re-derivation of the density the metrics module scores.
 
-    Uses the discretization:
-        integral ≈ ∑_k (p_k^{1+β} / w_k^{β})
-        f(y) ≈ p_at_y / dz_at_y
-        S_β = integral - (1 + 1/β) f(y)^β   (for β>0)
-    For β=0 the limit is -log f(y).
+    The production density is piecewise constant on the bins and is the forward
+    difference of the CDF::
+
+        f_k = [F(x_{k+1}) - F(x_k)] / w_k = p_k / w_k
+
+    with ``w_k`` the bin's own width.  ``w_k = 0`` would make that 0/0, but the
+    grid never reaches the metrics in that state: ``DistributionPrediction``
+    re-expresses the PMF on a regular grid at construction time (see
+    ``wrappers.base.regrid_to_uniform``), so every width here is positive and
+    the reference needs no special case.  The result is renormalised so that
+    ``∑_k f_k w_k = 1``, which for an exact PMF is already true.
+
+    Both terms of a two-term rule must be functionals of this *same* ``f`` for
+    the rule to be proper, so the reference builds ``f`` once and returns it
+    together with the effective widths that integrate it.
+
+    Returns
+    -------
+    f : np.ndarray
+        Per-bin density values, shape ``(n_bins,)``.
+    w_eff : np.ndarray
+        Per-bin effective widths, shape ``(n_bins,)``, with ``∑ f w_eff = 1``.
     """
-    eps = 1e-10
-    bw = np.asarray(bin_widths, dtype=float)
-    bw = np.maximum(bw, eps)
     probas = np.asarray(probas, dtype=float)
-    p_at_y = float(p_at_y)
-    dz_at_y = float(max(dz_at_y, eps))
+    edges = np.asarray(bin_edges, dtype=float)
+    widths = np.diff(edges)
+    eps = 100 * np.finfo(np.float64).eps
+
+    f = probas / np.maximum(widths, eps)
+    w_eff = widths
+
+    return f / max((f * w_eff).sum(), eps), w_eff
+
+
+def reference_dpd_score(probas, bin_edges, y, beta):
+    """Reference DPD score built from the unified bin density.
+
+        S_β = ∫ f(t)^{1+β} dt - (1 + 1/β) f(y)^β    (β > 0)
+        S_0 = -log f(y)                              (β = 0 limit)
+
+    Because ``f`` is piecewise constant, ``∫ f^{1+β}`` has the closed form
+    ``∑_k f_k^{1+β} w_k^eff`` — no quadrature is needed — and ``f(y)`` is the
+    value of that *same* ``f`` on the bin containing ``y``, which is the
+    propriety-preserving pairing.
+    """
+    f, w_eff = _reference_unified_density(probas, bin_edges)
+    edges = np.asarray(bin_edges, dtype=float)
+    y_bin = int(np.clip(np.searchsorted(edges[1:], y), 0, len(f) - 1))
+
+    eps = 1e-10
+    g_y = max(float(f[y_bin]), eps)
 
     if abs(beta) < 1e-12:
-        g_y = p_at_y / dz_at_y
-        g_y = max(g_y, eps)
         return -math.log(g_y)
 
-    integral = np.sum(probas ** (1.0 + beta) / (bw ** beta))
-    g_y = p_at_y / dz_at_y
+    integral = float((f ** (1.0 + beta) * w_eff).sum())
     point_term = (1.0 + 1.0 / beta) * (g_y ** beta)
     return integral - point_term
 
@@ -147,17 +183,30 @@ class TestDPDExactValues:
 
     @pytest.mark.parametrize("beta", DPD_BETAS)
     def test_perfect_vs_imperfect_ordering(self, beta):
-        """Perfect prediction should score better (lower) than imperfect prediction."""
-        dist_perfect, y_perfect = get_perfect_prediction_distribution(bin_idx=1)
-        dist_imperfect = get_imperfect_distribution()
-        y_imperfect = np.array([1.5], dtype=np.float32)
+        """Perfect prediction should score better (lower) than imperfect prediction.
 
-        metrics_perfect = compute_scoring_rules(dist_perfect, y_perfect)
-        metrics_imperfect = compute_scoring_rules(dist_imperfect, y_imperfect)
+        ``y`` is placed strictly inside a bin rather than on an edge: bins are
+        read as half-open ``(left, right]``, so a target sitting exactly on
+        ``edges[15]`` belongs to bin 14, and a spike put in bin 15 would then be
+        scored as a *miss* rather than as a perfect prediction.
+        """
+        edges = np.linspace(0.0, 3.0, 31)
+        mids = 0.5 * (edges[:-1] + edges[1:])
+        y = np.array([1.55], dtype=np.float32)
+
+        probas_perfect = np.zeros((1, 30))
+        probas_perfect[0, 15] = 1.0                      # the bin containing y
+        probas_imperfect = np.full((1, 30), 1.0 / 30.0)
+
+        def _dist(probas):
+            return DistributionPrediction(
+                probas=probas, bin_edges=edges, bin_midpoints=mids,
+                mean=(probas * mids).sum(axis=1),
+            )
 
         key = f"dpd_beta_{beta}"
-        score_perfect = metrics_perfect[key]
-        score_imperfect = metrics_imperfect[key]
+        score_perfect = compute_scoring_rules(_dist(probas_perfect), y)[key]
+        score_imperfect = compute_scoring_rules(_dist(probas_imperfect), y)[key]
 
         assert score_perfect < score_imperfect, (
             f"Perfect prediction ({score_perfect:.6f}) should score lower (better) "
@@ -232,20 +281,29 @@ class TestLimitBehavior:
 
         metrics = compute_scoring_rules(dist, y_true)
 
-        # Extract low-level values for the single sample
         probas = dist.probas[0]
-        bin_edges = dist.bin_edges
-        bin_widths = np.diff(bin_edges)
-        # index of y=1.5 is middle bin
-        p_at_y = float(probas[1])
-        dz_at_y = float(bin_widths[1])
+        y = float(y_true[0])
 
         for beta in DPD_BETAS:
             key = f"dpd_beta_{beta}"
-            ref = reference_dpd_score(probas, bin_widths, p_at_y, dz_at_y, beta)
-            assert math.isclose(metrics[key], ref, rel_tol=1e-6, abs_tol=1e-6), (
+            ref = reference_dpd_score(probas, dist.bin_edges, y, beta)
+            # Both sides evaluate the same closed form, so only float summation
+            # order separates them; the tolerance is deliberately generous.
+            assert math.isclose(metrics[key], ref, rel_tol=1e-4, abs_tol=1e-6), (
                 f"DPD implementation {key}={metrics[key]:.8f} differs from reference {ref:.8f}"
             )
+
+    def test_reference_density_integrates_to_one(self):
+        """The reference density must be a density (∫ f = 1).
+
+        Guards the reference itself: if the renormalisation or the effective
+        widths were wrong, every ∫ f^{1+β} term would be biased and the
+        cross-check above would compare two equally wrong numbers.
+        """
+        dist = get_imperfect_distribution()
+        f, w_eff = _reference_unified_density(dist.probas[0], dist.bin_edges)
+        mass = float((f * w_eff).sum())
+        assert math.isclose(mass, 1.0, rel_tol=1e-12), f"∫ f = {mass:.8f}, expected 1"
 
 
 class TestEdgeCasesAndRobustness:
